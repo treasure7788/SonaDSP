@@ -868,8 +868,12 @@
       let biquadNodePool = [];
       let preAnalyser = null;
       let postAnalyser = null;
-      let startTime = 0;
       let pauseOffset = 0;
+      // Playback anchor: buffer position `anchorPos` was playing at audioCtx time `anchorCtxTime`
+      let anchorPos = 0;
+      let anchorCtxTime = 0;
+      // A-B loop (seconds into the current buffer)
+      const abLoop = { a: null, b: null, enabled: false };
 
       let floatFftPre = null;
       let floatFftPost = null;
@@ -1072,19 +1076,43 @@
         }
       }
 
+      // Effective loop region: the A-B region when active, otherwise the whole buffer.
+      function getLoopRegion() {
+        const dur = audioBuffer ? audioBuffer.duration : 0;
+        if (abLoop.enabled && abLoop.a !== null && abLoop.b !== null && abLoop.b > abLoop.a) {
+          return { start: abLoop.a, end: Math.min(abLoop.b, dur), active: true };
+        }
+        return { start: 0, end: dur, active: false };
+      }
+
+      // Current playhead position in seconds (accounts for A-B looping).
+      function getPlaybackPosition() {
+        if (!audioCtx || !audioBuffer || !state.isPlaying) return pauseOffset;
+        const r = getLoopRegion();
+        let pos = anchorPos + (audioCtx.currentTime - anchorCtxTime);
+        const span = r.end - r.start;
+        if (span > 0 && pos >= r.end) pos = r.start + ((pos - r.start) % span);
+        return pos;
+      }
+
       function startAudioPlayback(offsetSec = 0) {
         const ctx = ensureAudioEngine();
         if (!audioBuffer) return;
 
         stopAudioPlayback();
+        const r = getLoopRegion();
         const src = ctx.createBufferSource();
         src.buffer = audioBuffer;
         src.loop = true;
+        src.loopStart = r.start;
+        src.loopEnd = r.end;
         src.connect(preAnalyser);
 
-        const safeOffset = offsetSec % audioBuffer.duration;
+        let safeOffset = offsetSec % audioBuffer.duration;
+        if (r.active && safeOffset >= r.end) safeOffset = r.start;
         src.start(0, safeOffset);
-        startTime = ctx.currentTime - safeOffset;
+        anchorPos = safeOffset;
+        anchorCtxTime = ctx.currentTime;
         pauseOffset = safeOffset;
         sourceNode = src;
         state.isPlaying = true;
@@ -1092,14 +1120,188 @@
       }
 
       function togglePlayPause() {
-        const ctx = ensureAudioEngine();
+        ensureAudioEngine();
         if (state.isPlaying) {
-          pauseOffset = (ctx.currentTime - startTime) % (audioBuffer ? audioBuffer.duration : 1);
+          pauseOffset = getPlaybackPosition();
           stopAudioPlayback();
           state.isPlaying = false;
           updatePlayButtonUi();
         } else {
           startAudioPlayback(pauseOffset);
+        }
+      }
+
+      // ---------------- A-B loop controls ----------------
+      const LOOP_BTN_OFF = 'px-3 py-1.5 rounded-lg text-xs font-bold bg-[#FBF9F5] text-[#5C5852] hover:text-[#1E1D1A] border border-[#DED8CC] transition cursor-pointer';
+      const LOOP_BTN_SET = 'px-3 py-1.5 rounded-lg text-xs font-bold bg-[#C97026] text-[#FBF9F5] border border-[#A85A1A] transition cursor-pointer';
+      const LOOP_TOGGLE_BASE = 'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold border transition cursor-pointer ';
+      const LOOP_TOGGLE_ON = LOOP_TOGGLE_BASE + 'bg-[#2E644C] text-[#FBF9F5] border-[#214B38]';
+      const LOOP_TOGGLE_OFF = LOOP_TOGGLE_BASE + 'bg-[#FBF9F5] text-[#5C5852] hover:text-[#1E1D1A] border-[#DED8CC]';
+      const LOOP_CLEAR_BASE = 'px-2 py-1.5 rounded-lg text-xs font-bold bg-[#FBF9F5] text-[#5C5852] hover:text-[#C84B31] border border-[#DED8CC] transition cursor-pointer';
+
+      function formatTimeFine(sec) {
+        if (sec === null || !Number.isFinite(sec) || sec < 0) return '--:--';
+        const m = Math.floor(sec / 60);
+        const s = sec - m * 60;
+        return `${m}:${s.toFixed(1).padStart(4, '0')}`;
+      }
+
+      function updateAbLoopUi() {
+        const btnA = document.getElementById('btnLoopA');
+        const btnB = document.getElementById('btnLoopB');
+        const btnT = document.getElementById('btnLoopToggle');
+        const btnC = document.getElementById('btnLoopClear');
+        const readout = document.getElementById('loopReadout');
+        const seekEl = document.getElementById('seekSlider');
+        if (!btnA || !btnB || !btnT || !btnC || !readout) return;
+
+        const hasA = abLoop.a !== null;
+        const hasB = abLoop.b !== null;
+        const hasRegion = hasA && hasB;
+
+        btnA.className = hasA ? LOOP_BTN_SET : LOOP_BTN_OFF;
+        btnB.className = hasB ? LOOP_BTN_SET : LOOP_BTN_OFF;
+        btnT.className = (abLoop.enabled && hasRegion ? LOOP_TOGGLE_ON : LOOP_TOGGLE_OFF) + (hasRegion ? '' : ' opacity-50');
+        btnC.className = LOOP_CLEAR_BASE + (hasA || hasB ? '' : ' opacity-50');
+
+        if (hasA || hasB) {
+          readout.classList.remove('hidden');
+          readout.textContent = `${formatTimeFine(abLoop.a)} \u2192 ${formatTimeFine(abLoop.b)}`;
+        } else {
+          readout.classList.add('hidden');
+        }
+
+        // Paint the loop region on the seek bar
+        if (seekEl) {
+          const dur = audioBuffer ? audioBuffer.duration : state.duration || 1;
+          const pct = (t) => `${Math.max(0, Math.min(100, (t / dur) * 100)).toFixed(2)}%`;
+          let from = 0;
+          let to = 0;
+          if (hasRegion) {
+            from = abLoop.a;
+            to = abLoop.b;
+          } else if (hasA) {
+            from = abLoop.a;
+            to = abLoop.a + dur * 0.015;
+          } else if (hasB) {
+            from = Math.max(0, abLoop.b - dur * 0.015);
+            to = abLoop.b;
+          }
+          seekEl.style.setProperty('--loop-a', pct(from));
+          seekEl.style.setProperty('--loop-b', pct(to));
+          seekEl.style.setProperty('--loop-color', hasA || hasB ? (abLoop.enabled || !hasRegion ? '#C97026' : '#E3C3A3') : 'transparent');
+        }
+      }
+
+      // Applies a change to the loop settings without interrupting playback unless the
+      // playhead ends up outside the new loop region (then it jumps to A).
+      function mutateLoop(mutator) {
+        const wasPlaying = state.isPlaying && !!sourceNode;
+        const pos = getPlaybackPosition(); // position under the *old* loop settings
+        mutator();
+        const r = getLoopRegion();
+
+        let target = pos;
+        if (r.active && (pos < r.start || pos >= r.end)) target = r.start;
+
+        if (wasPlaying) {
+          if (target !== pos) {
+            startAudioPlayback(target);
+          } else {
+            sourceNode.loopStart = r.start;
+            sourceNode.loopEnd = r.end;
+            anchorPos = pos;
+            anchorCtxTime = audioCtx.currentTime;
+          }
+        } else {
+          pauseOffset = target;
+          const seekEl = document.getElementById('seekSlider');
+          if (seekEl) seekEl.value = target;
+          document.getElementById('timeCurrent').textContent = formatTime(target);
+        }
+        updateAbLoopUi();
+      }
+
+      function setLoopPoint(which) {
+        ensureAudioEngine();
+        const pos = getPlaybackPosition();
+        let a = abLoop.a;
+        let b = abLoop.b;
+        if (which === 'a') a = pos;
+        else b = pos;
+
+        if (a !== null && b !== null) {
+          if (a > b) [a, b] = [b, a];
+          if (b - a < 0.05) {
+            showToast('Loop too short \u2014 move the playhead and try again');
+            return;
+          }
+        }
+
+        mutateLoop(() => {
+          abLoop.a = a;
+          abLoop.b = b;
+          if (a !== null && b !== null) abLoop.enabled = true;
+        });
+
+        if (a !== null && b !== null) {
+          showToast(`Looping ${formatTimeFine(a)} \u2192 ${formatTimeFine(b)}`);
+        } else {
+          showToast(which === 'a' ? 'Loop start (A) set \u2014 now set B' : 'Loop end (B) set \u2014 now set A');
+        }
+      }
+
+      function toggleLoop() {
+        if (abLoop.a === null || abLoop.b === null) {
+          showToast('Set both A and B first');
+          return;
+        }
+        mutateLoop(() => {
+          abLoop.enabled = !abLoop.enabled;
+        });
+        showToast(abLoop.enabled ? 'A-B loop on' : 'A-B loop off');
+      }
+
+      function clearLoop() {
+        if (abLoop.a === null && abLoop.b === null) return;
+        mutateLoop(() => {
+          abLoop.a = null;
+          abLoop.b = null;
+          abLoop.enabled = false;
+        });
+        showToast('A-B loop cleared');
+      }
+
+      // Used when the audio source changes: positions no longer mean anything.
+      function resetAbLoop() {
+        abLoop.a = null;
+        abLoop.b = null;
+        abLoop.enabled = false;
+        updateAbLoopUi();
+      }
+
+      // ---------------- Audio file loading (file picker + drag & drop) ----------------
+      async function loadAudioFile(file) {
+        const ctx = ensureAudioEngine();
+        showToast(`Loading ${file.name}...`);
+        try {
+          const ab = await file.arrayBuffer();
+          const decoded = await ctx.decodeAudioData(ab);
+          audioBuffer = decoded;
+          resetAbLoop();
+          state.audioSourceType = 'file';
+          state.fileName = file.name;
+          state.duration = decoded.duration;
+          state.ltasBands = computeBufferLTAS(decoded);
+          document.getElementById('audioSourceLabel').textContent = file.name;
+          document.getElementById('ltasStatusText').textContent = `LTAS: ${file.name.slice(0, 18)}`;
+          document.getElementById('btnSourceSynth').className = 'px-3 py-1.5 rounded-lg text-xs font-bold bg-[#FBF9F5] text-[#5C5852] hover:text-[#1E1D1A] border border-[#DED8CC] transition cursor-pointer';
+          document.getElementById('btnSourcePink').className = 'px-3 py-1.5 rounded-lg text-xs font-bold bg-[#FBF9F5] text-[#5C5852] hover:text-[#1E1D1A] border border-[#DED8CC] transition cursor-pointer';
+          updateTransportDurationUi();
+          startAudioPlayback(0);
+          showToast(`Loaded ${file.name}`);
+        } catch (err) {
+          showToast(`Audio decode error: ${err && err.message ? err.message : 'unsupported file'}`);
         }
       }
 
@@ -1407,7 +1609,7 @@
 
         // 4. Full-Range Live FFT Spectrum (-90 dBFS to 0 dBFS)
         if (audioCtx && postAnalyser && state.isPlaying) {
-          const elapsed = (audioCtx.currentTime - startTime) % (audioBuffer ? audioBuffer.duration : 1);
+          const elapsed = getPlaybackPosition();
           const timeCurEl = document.getElementById('timeCurrent');
           const seekEl = document.getElementById('seekSlider');
           if (timeCurEl) timeCurEl.textContent = formatTime(elapsed);
@@ -2193,6 +2395,7 @@
         audioBuffer = createSynthesizedAudioBuffer(ctx, 'synth');
         state.audioSourceType = 'synth';
         state.fileName = 'Reference Groove (Built-in)';
+        resetAbLoop();
         state.duration = audioBuffer.duration;
         state.ltasBands = computeBufferLTAS(audioBuffer);
         document.getElementById('audioSourceLabel').textContent = state.fileName;
@@ -2208,6 +2411,7 @@
         audioBuffer = createSynthesizedAudioBuffer(ctx, 'pink');
         state.audioSourceType = 'pink';
         state.fileName = 'Pink Noise (Calibrated)';
+        resetAbLoop();
         state.duration = audioBuffer.duration;
         state.ltasBands = computeBufferLTAS(audioBuffer);
         document.getElementById('audioSourceLabel').textContent = state.fileName;
@@ -2225,23 +2429,66 @@
       document.getElementById('audioFileInput').addEventListener('change', async (e) => {
         const file = e.target.files?.[0];
         if (!file) return;
-        const ctx = ensureAudioEngine();
-        try {
-          const ab = await file.arrayBuffer();
-          const decoded = await ctx.decodeAudioData(ab);
-          audioBuffer = decoded;
-          state.audioSourceType = 'file';
-          state.fileName = file.name;
-          state.duration = decoded.duration;
-          state.ltasBands = computeBufferLTAS(decoded);
-          document.getElementById('audioSourceLabel').textContent = file.name;
-          document.getElementById('ltasStatusText').textContent = `LTAS: ${file.name.slice(0, 18)}`;
-          updateTransportDurationUi();
-          startAudioPlayback(0);
-          showToast(`Loaded ${file.name}`);
-        } catch (err) {
-          showToast(`Audio decode error: ${err.message}`);
+        await loadAudioFile(file);
+        e.target.value = ''; // allow re-selecting the same file
+      });
+
+      // ---- A-B loop buttons ----
+      document.getElementById('btnLoopA').addEventListener('click', () => setLoopPoint('a'));
+      document.getElementById('btnLoopB').addEventListener('click', () => setLoopPoint('b'));
+      document.getElementById('btnLoopToggle').addEventListener('click', toggleLoop);
+      document.getElementById('btnLoopClear').addEventListener('click', clearLoop);
+
+      window.addEventListener('keydown', (e) => {
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        if (['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) return;
+        if (e.key === '[') setLoopPoint('a');
+        else if (e.key === ']') setLoopPoint('b');
+        else if (e.key.toLowerCase() === 'l') toggleLoop();
+      });
+
+      // ---- Drag & drop audio anywhere on the page ----
+      const AUDIO_EXT_RE = /\.(mp3|wav|flac|ogg|oga|opus|m4a|aac|aif|aiff|weba)$/i;
+      const dropOverlay = document.getElementById('audioDropOverlay');
+      let dragDepth = 0;
+
+      function dragHasFiles(e) {
+        return !!e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+      }
+      function isAudioFile(f) {
+        return (f.type && f.type.startsWith('audio/')) || AUDIO_EXT_RE.test(f.name);
+      }
+      function setDropOverlay(on) {
+        dropOverlay.classList.toggle('active', on);
+      }
+
+      window.addEventListener('dragenter', (e) => {
+        if (!dragHasFiles(e)) return;
+        e.preventDefault();
+        dragDepth++;
+        setDropOverlay(true);
+      });
+      window.addEventListener('dragover', (e) => {
+        if (!dragHasFiles(e)) return;
+        e.preventDefault(); // required so the browser allows the drop
+        e.dataTransfer.dropEffect = 'copy';
+      });
+      window.addEventListener('dragleave', (e) => {
+        if (!dragHasFiles(e)) return;
+        dragDepth = Math.max(0, dragDepth - 1);
+        if (dragDepth === 0) setDropOverlay(false);
+      });
+      window.addEventListener('drop', async (e) => {
+        if (!dragHasFiles(e)) return;
+        e.preventDefault(); // stop the browser from navigating to the dropped file
+        dragDepth = 0;
+        setDropOverlay(false);
+        const file = Array.from(e.dataTransfer.files).find(isAudioFile);
+        if (!file) {
+          showToast('Drop an audio file (MP3, WAV, FLAC, OGG, M4A, OPUS)');
+          return;
         }
+        await loadAudioFile(file);
       });
 
       // Preamp & A/B Toggle
