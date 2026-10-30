@@ -34,7 +34,7 @@
 * **Poweramp Equalizer (`.json`):** One-click export of formatted parametric band presets compatible with Poweramp Equalizer on Android.
 
 ---
-
+~~~text
 sonadsp/
 ├── css/
 │   └── style.css    # Warm studio color tokens, range sliders, and tabular UI styles
@@ -43,7 +43,6 @@ sonadsp/
 ├── index.html       # Studio layout, dual-axis canvas stage, PEQ table, and modals
 ├── LICENSE          # MIT License
 └── README.md        # Project documentation
-
 ~~~
 
 *(Note: Can also be deployed as a single self-contained `index.html` file.)*
