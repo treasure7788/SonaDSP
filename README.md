@@ -45,7 +45,6 @@ sonadsp/
 └── README.md        # Project documentation
 ~~~
 
-*(Note: Can also be deployed as a single self-contained `index.html` file.)*
 
 ---
 
