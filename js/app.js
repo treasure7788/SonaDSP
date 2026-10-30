@@ -1855,7 +1855,7 @@
               body: JSON.stringify({
                 model: state.modelId,
                 messages,
-                temperature: 0.2
+                temperature: 0.2,
                 max_tokens: 4096
               })
             });
