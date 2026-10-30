@@ -695,22 +695,48 @@
         return -clamped * 90;
       }
 
-      function computeBandMagnitudeDb(band, freqArray, sampleRate = 48000) {
-        const outDb = new Float32Array(freqArray.length);
-        if (!band.enabled) return outDb;
+      // ====================================================================
+      // BIQUAD MATH: single source of truth for the graph, the audio engine,
+      // the AutoEQ solver and the curve cache.
+      //   peaking          : RBJ, linear Q (same as BiquadFilterNode)
+      //   lowshelf/highshelf: RBJ shelf in Q form, alpha = sin(w0) / (2Q)
+      //                      (Q = 1/sqrt(2) is identical to the node's fixed S = 1 shelf)
+      //   lowpass/highpass : RBJ, LINEAR Q (the native node wants dB; see linearQToNodeDb)
+      // ====================================================================
+      const EQ_MAX_BANDS = 10;
+      const GAIN_LIMIT_DB = 40; // sanity bound only; the UI limits bands to +/-15 dB
 
-        const f0 = Math.max(20, Math.min(sampleRate * 0.49, band.frequency));
-        const gainDb = band.gain;
-        const Q = Math.max(0.1, Math.min(18.0, band.Q));
-        const A = Math.pow(10, gainDb / 40);
-        const w0 = (2 * Math.PI * f0) / sampleRate;
+      // True while the audio engine really applies shelf Q (AudioWorklet engine).
+      // False only if we had to fall back to the native BiquadFilterNode, whose shelves
+      // have a fixed slope and ignore Q. The graph follows whichever engine is live.
+      let engineHonorsShelfQ = true;
+
+      function clampQ(q) {
+        return Math.max(0.1, Math.min(18.0, q));
+      }
+
+      // BiquadFilterNode reads Q as dB for lowpass/highpass: alpha = sin(w0) / (2 * 10^(Q/20)).
+      function linearQToNodeDb(q) {
+        return 20 * Math.log10(clampQ(q));
+      }
+
+      // NOTE: self-contained on purpose. Its source text is injected into the AudioWorklet,
+      // so it must not reference anything outside its own body.
+      // Writes normalized [b0, b1, b2, a1, a2] into `out` (allocated if omitted).
+      function computeBiquadCoeffs(type, freq, gainDb, Q, sr, fixedShelf, out) {
+        out = out || new Float64Array(5);
+        const isShelf = type === 'lowshelf' || type === 'highshelf';
+        const f0 = Math.max(20, Math.min(sr * 0.49, freq));
+        const q = fixedShelf && isShelf ? Math.SQRT1_2 : Math.max(0.1, Math.min(18.0, Q));
+        const A = Math.pow(10, Math.max(-40, Math.min(40, gainDb)) / 40);
+        const w0 = (2 * Math.PI * f0) / sr;
         const cosW0 = Math.cos(w0);
         const sinW0 = Math.sin(w0);
-        const alpha = sinW0 / (2 * Q);
+        const alpha = sinW0 / (2 * q);
 
         let b0 = 1, b1 = 0, b2 = 0, a0 = 1, a1 = 0, a2 = 0;
 
-        switch (band.filterType) {
+        switch (type) {
           case 'peaking':
             b0 = 1 + alpha * A;
             b1 = -2 * cosW0;
@@ -720,27 +746,23 @@
             a2 = 1 - alpha / A;
             break;
           case 'lowshelf': {
-            const sqrtA = Math.sqrt(A);
-            const shelfTerm = (A + 1 / A) * (1 / Q - 1) + 2;
-            const alphaS = (sinW0 / 2) * Math.sqrt(Math.max(0.001, shelfTerm));
-            b0 = A * ((A + 1) - (A - 1) * cosW0 + 2 * sqrtA * alphaS);
+            const k2 = 2 * Math.sqrt(A) * alpha;
+            b0 = A * ((A + 1) - (A - 1) * cosW0 + k2);
             b1 = 2 * A * ((A - 1) - (A + 1) * cosW0);
-            b2 = A * ((A + 1) - (A - 1) * cosW0 - 2 * sqrtA * alphaS);
-            a0 = (A + 1) + (A - 1) * cosW0 + 2 * sqrtA * alphaS;
+            b2 = A * ((A + 1) - (A - 1) * cosW0 - k2);
+            a0 = (A + 1) + (A - 1) * cosW0 + k2;
             a1 = -2 * ((A - 1) + (A + 1) * cosW0);
-            a2 = (A + 1) + (A - 1) * cosW0 - 2 * sqrtA * alphaS;
+            a2 = (A + 1) + (A - 1) * cosW0 - k2;
             break;
           }
           case 'highshelf': {
-            const sqrtA = Math.sqrt(A);
-            const shelfTerm = (A + 1 / A) * (1 / Q - 1) + 2;
-            const alphaS = (sinW0 / 2) * Math.sqrt(Math.max(0.001, shelfTerm));
-            b0 = A * ((A + 1) + (A - 1) * cosW0 + 2 * sqrtA * alphaS);
+            const k2 = 2 * Math.sqrt(A) * alpha;
+            b0 = A * ((A + 1) + (A - 1) * cosW0 + k2);
             b1 = -2 * A * ((A - 1) + (A + 1) * cosW0);
-            b2 = A * ((A + 1) + (A - 1) * cosW0 - 2 * sqrtA * alphaS);
-            a0 = (A + 1) - (A - 1) * cosW0 + 2 * sqrtA * alphaS;
+            b2 = A * ((A + 1) + (A - 1) * cosW0 - k2);
+            a0 = (A + 1) - (A - 1) * cosW0 + k2;
             a1 = 2 * ((A - 1) - (A + 1) * cosW0);
-            a2 = (A + 1) - (A - 1) * cosW0 - 2 * sqrtA * alphaS;
+            a2 = (A + 1) - (A - 1) * cosW0 - k2;
             break;
           }
           case 'lowpass':
@@ -761,25 +783,92 @@
             break;
         }
 
-        b0 /= a0; b1 /= a0; b2 /= a0;
-        a1 /= a0; a2 /= a0;
+        out[0] = b0 / a0;
+        out[1] = b1 / a0;
+        out[2] = b2 / a0;
+        out[3] = a1 / a0;
+        out[4] = a2 / a0;
+        return out;
+      }
 
-        for (let i = 0; i < freqArray.length; i++) {
-          const w = (2 * Math.PI * freqArray[i]) / sampleRate;
-          const cosW = Math.cos(w);
-          const cos2W = Math.cos(2 * w);
-          const sinW = Math.sin(w);
-          const sin2W = Math.sin(2 * w);
+      // cos(w) and cos(2w) for a frequency grid. |H|^2 only needs these two
+      // (sin terms cancel), so there are two tables per sample rate, not four.
+      function buildTrigTable(freqArray, sr) {
+        const n = freqArray.length;
+        const cosW = new Float64Array(n);
+        const cos2W = new Float64Array(n);
+        for (let i = 0; i < n; i++) {
+          const w = (2 * Math.PI * freqArray[i]) / sr;
+          cosW[i] = Math.cos(w);
+          cos2W[i] = Math.cos(2 * w);
+        }
+        return { cosW, cos2W };
+      }
 
-          const numR = b0 + b1 * cosW + b2 * cos2W;
-          const numI = -b1 * sinW - b2 * sin2W;
-          const denR = 1 + a1 * cosW + a2 * cos2W;
-          const denI = -a1 * sinW - a2 * sin2W;
+      const gridTrigCache = new Map();
+      function getGridTrig(sr) {
+        let tbl = gridTrigCache.get(sr);
+        if (!tbl) {
+          tbl = buildTrigTable(LOG_FREQS, sr);
+          gridTrigCache.set(sr, tbl);
+        }
+        return tbl;
+      }
 
-          const magSq = (numR * numR + numI * numI) / Math.max(1e-12, denR * denR + denI * denI);
-          outDb[i] = 10 * Math.log10(Math.max(1e-8, magSq));
+      function writeBandMagnitudeDb(outDb, band, sr, tbl) {
+        const c = computeBiquadCoeffs(band.filterType, band.frequency, band.gain, band.Q, sr, !engineHonorsShelfQ);
+        const b0 = c[0], b1 = c[1], b2 = c[2], a1 = c[3], a2 = c[4];
+        // |b0 + b1 z^-1 + b2 z^-2|^2 = b0^2+b1^2+b2^2 + 2(b0 b1 + b1 b2) cos w + 2 b0 b2 cos 2w
+        const n0 = b0 * b0 + b1 * b1 + b2 * b2;
+        const n1 = 2 * (b0 * b1 + b1 * b2);
+        const n2 = 2 * b0 * b2;
+        const d0 = 1 + a1 * a1 + a2 * a2;
+        const d1 = 2 * (a1 + a1 * a2);
+        const d2 = 2 * a2;
+        const cosW = tbl.cosW;
+        const cos2W = tbl.cos2W;
+        for (let i = 0; i < outDb.length; i++) {
+          const num = n0 + n1 * cosW[i] + n2 * cos2W[i];
+          const den = d0 + d1 * cosW[i] + d2 * cos2W[i];
+          outDb[i] = 10 * Math.log10(Math.max(1e-8, num / Math.max(1e-12, den)));
         }
         return outDb;
+      }
+
+      // Per-band curve cache. A WeakMap keeps the cache out of the band objects, which get
+      // JSON-cloned for undo. The returned array is shared: callers must treat it as read-only.
+      const bandCurveCache = new WeakMap();
+      function getBandCurveDb(band, sr) {
+        const fixed = !engineHonorsShelfQ;
+        let e = bandCurveCache.get(band);
+        if (e && e.type === band.filterType && e.f === band.frequency && e.g === band.gain &&
+            e.q === band.Q && e.sr === sr && e.fixed === fixed) {
+          return e.curve;
+        }
+        if (!e) {
+          e = { curve: new Float32Array(NUM_FREQ_POINTS) };
+          bandCurveCache.set(band, e);
+        }
+        writeBandMagnitudeDb(e.curve, band, sr, getGridTrig(sr));
+        e.type = band.filterType;
+        e.f = band.frequency;
+        e.g = band.gain;
+        e.q = band.Q;
+        e.sr = sr;
+        e.fixed = fixed;
+        return e.curve;
+      }
+
+      // Uncached, allocating variant with the original signature (disabled band -> flat 0 dB).
+      function computeBandMagnitudeDb(band, freqArray, sampleRate = 48000) {
+        const outDb = new Float32Array(freqArray.length);
+        if (!band.enabled) return outDb;
+        const tbl = freqArray === LOG_FREQS ? getGridTrig(sampleRate) : buildTrigTable(freqArray, sampleRate);
+        return writeBandMagnitudeDb(outDb, band, sampleRate, tbl);
+      }
+
+      function currentSampleRate() {
+        return audioCtx ? audioCtx.sampleRate : 48000;
       }
 
       function recomputeAcousticCurves() {
@@ -838,7 +927,7 @@
         const sr = audioCtx ? audioCtx.sampleRate : 48000;
         state.bands.forEach((band) => {
           if (!band.enabled) return;
-          const bDb = computeBandMagnitudeDb(band, LOG_FREQS, sr);
+          const bDb = getBandCurveDb(band, sr);
           for (let i = 0; i < NUM_FREQ_POINTS; i++) {
             compositeEqDbArray[i] += bDb[i];
           }
@@ -866,6 +955,8 @@
       let sourceNode = null;
       let preampGainNode = null;
       let biquadNodePool = [];
+      let eqWorkletNode = null;          // AudioWorklet EQ engine (null while on the native fallback)
+      let eqWorkletInitStarted = false;
       let preAnalyser = null;
       let postAnalyser = null;
       let pauseOffset = 0;
@@ -921,12 +1012,28 @@
           updateTransportDurationUi();
           renderTelemetryMatrix();
           syncWebAudioBiquadNodes();
+          initEqWorklet();
         }
 
         if (audioCtx.state === 'suspended') {
           audioCtx.resume();
         }
         return audioCtx;
+      }
+
+      function buildEqWorkletParams() {
+        const list = [];
+        for (let i = 0; i < EQ_MAX_BANDS; i++) {
+          const b = state.bands[i];
+          list.push(b ? {
+            t: b.filterType,
+            a: !!(b.enabled && state.isEqActive),
+            f: Math.max(20, Math.min(20000, b.frequency)),
+            g: Math.max(-GAIN_LIMIT_DB, Math.min(GAIN_LIMIT_DB, b.gain)),
+            q: clampQ(b.Q)
+          } : null);
+        }
+        return list;
       }
 
       function syncWebAudioBiquadNodes() {
@@ -942,23 +1049,200 @@
         const linearPreamp = state.isEqActive ? Math.pow(10, state.preampDb / 20) : 1.0;
         preampGainNode.gain.setTargetAtTime(linearPreamp, now, tau);
 
+        // AudioWorklet engine: runs computeBiquadCoeffs, the same math the graph plots.
+        if (eqWorkletNode) {
+          eqWorkletNode.port.postMessage({ bands: buildEqWorkletParams() });
+          return;
+        }
+
+        // Fallback engine: native BiquadFilterNode chain.
         for (let i = 0; i < biquadNodePool.length; i++) {
           const node = biquadNodePool[i];
           const band = state.bands[i];
           if (band && band.enabled && state.isEqActive) {
+            const isPass = band.filterType === 'lowpass' || band.filterType === 'highpass';
             if (node.type !== band.filterType) node.type = band.filterType;
             node.frequency.setTargetAtTime(Math.max(20, Math.min(20000, band.frequency)), now, tau);
-            node.Q.setTargetAtTime(Math.max(0.1, Math.min(18.0, band.Q)), now, tau);
-            node.gain.setTargetAtTime(Math.max(-15, Math.min(15, band.gain)), now, tau);
+            // Native LP/HP read Q in dB; convert so the node matches the linear-Q graph.
+            node.Q.setTargetAtTime(isPass ? linearQToNodeDb(band.Q) : clampQ(band.Q), now, tau);
+            node.gain.setTargetAtTime(Math.max(-GAIN_LIMIT_DB, Math.min(GAIN_LIMIT_DB, band.gain)), now, tau);
           } else {
             node.type = 'peaking';
             if (band) {
               node.frequency.setTargetAtTime(Math.max(20, Math.min(20000, band.frequency)), now, tau);
-              node.Q.setTargetAtTime(Math.max(0.1, Math.min(18.0, band.Q)), now, tau);
+              node.Q.setTargetAtTime(clampQ(band.Q), now, tau);
             }
             node.gain.setTargetAtTime(0, now, tau);
           }
         }
+      }
+
+      // --------------------------------------------------------------------
+      // AudioWorklet EQ engine. Its body is stringified into the worklet module,
+      // so it must stay self-contained (computeBiquadCoeffs is prepended to it).
+      // --------------------------------------------------------------------
+      function sonaEqWorkletBody() {
+        const N = 10;
+        const TAU = 0.016;
+
+        class SonaEqProcessor extends AudioWorkletProcessor {
+          constructor(options) {
+            super();
+            this.bands = [];
+            for (let i = 0; i < N; i++) {
+              this.bands.push({
+                type: 'peaking',
+                active: false,
+                tlf: Math.log(1000), tlq: 0, tg: 0, // targets: ln(freq), ln(Q), gain dB
+                clf: Math.log(1000), clq: 0, cg: 0, // smoothed current values
+                z: new Float64Array(4)              // TDF-II state, 2 channels x (z1, z2)
+              });
+            }
+            this.coef = new Float64Array(5);
+            const init = options && options.processorOptions;
+            if (init && init.bands) this.applyParams(init.bands, true);
+            this.port.onmessage = (ev) => {
+              const m = ev.data;
+              if (m && m.bands) this.applyParams(m.bands, false);
+            };
+          }
+
+          applyParams(list, snap) {
+            for (let i = 0; i < N; i++) {
+              const p = list[i];
+              const b = this.bands[i];
+              if (!p) { b.active = false; b.tg = 0; continue; }
+              const pass = p.t === 'lowpass' || p.t === 'highpass';
+              const wasActive = b.active;
+              const typeChanged = b.type !== p.t;
+              b.type = p.t;
+              b.active = !!p.a;
+              b.tlf = Math.log(p.f);
+              b.tlq = Math.log(p.q);
+              b.tg = p.a && !pass ? p.g : 0;
+              // Sweep frequency/Q only while a band is audible; otherwise jump straight there.
+              if (snap || typeChanged || !wasActive) { b.clf = b.tlf; b.clq = b.tlq; }
+              if (snap) b.cg = b.tg;
+            }
+          }
+
+          process(inputs, outputs) {
+            const input = inputs[0];
+            const output = outputs[0];
+            if (!input || input.length === 0 || !output || output.length === 0) return true;
+
+            const len = output[0].length;
+            const nch = Math.min(output.length, 2);
+            for (let c = 0; c < output.length; c++) {
+              output[c].set(input[Math.min(c, input.length - 1)]);
+            }
+
+            const k = 1 - Math.exp(-len / (sampleRate * TAU));
+            const co = this.coef;
+            for (let i = 0; i < N; i++) {
+              const b = this.bands[i];
+              const pass = b.type === 'lowpass' || b.type === 'highpass';
+
+              b.clf += (b.tlf - b.clf) * k;
+              b.clq += (b.tlq - b.clq) * k;
+              b.cg += (b.tg - b.cg) * k;
+              if (Math.abs(b.tg - b.cg) < 1e-4) b.cg = b.tg;
+
+              const idle = pass ? !b.active : (b.tg === 0 && b.cg === 0);
+              if (idle) { b.z.fill(0); continue; }
+
+              computeBiquadCoeffs(b.type, Math.exp(b.clf), b.cg, Math.exp(b.clq), sampleRate, false, co);
+              const b0 = co[0], b1 = co[1], b2 = co[2], a1 = co[3], a2 = co[4];
+              if (!(Number.isFinite(b0) && Number.isFinite(b1) && Number.isFinite(b2) &&
+                    Number.isFinite(a1) && Number.isFinite(a2))) continue;
+
+              for (let ch = 0; ch < nch; ch++) {
+                const x = output[ch];
+                let z1 = b.z[ch * 2];
+                let z2 = b.z[ch * 2 + 1];
+                for (let n = 0; n < len; n++) {
+                  const xn = x[n];
+                  const y = b0 * xn + z1;
+                  z1 = b1 * xn - a1 * y + z2;
+                  z2 = b2 * xn - a2 * y;
+                  x[n] = y;
+                }
+                if (!Number.isFinite(z1) || Math.abs(z1) < 1e-20) z1 = 0;
+                if (!Number.isFinite(z2) || Math.abs(z2) < 1e-20) z2 = 0;
+                b.z[ch * 2] = z1;
+                b.z[ch * 2 + 1] = z2;
+              }
+            }
+            return true;
+          }
+        }
+
+        registerProcessor('sona-eq', SonaEqProcessor);
+      }
+
+      function useNativeBiquadFallback(reason) {
+        // Route back through the native BiquadFilterNode chain. The graph then plots the fixed
+        // shelf slope those nodes actually apply, so it still matches what you hear.
+        if (eqWorkletNode) {
+          try { preampGainNode.disconnect(eqWorkletNode); } catch (e) { /* already detached */ }
+          try { eqWorkletNode.disconnect(); } catch (e) { /* already detached */ }
+          eqWorkletNode.onprocessorerror = null;
+          eqWorkletNode = null;
+          try {
+            preampGainNode.connect(biquadNodePool[0]);
+            biquadNodePool[biquadNodePool.length - 1].connect(postAnalyser);
+          } catch (e) { /* ignore */ }
+        }
+        engineHonorsShelfQ = false;
+        console.warn('SonaDSP: using native BiquadFilterNode fallback (' + reason + ')');
+        syncWebAudioBiquadNodes();
+        showToast('Preview uses the browser\u2019s built-in filters: shelf Q is not applied to the sound (the graph shows the fixed shelf slope).');
+      }
+
+      function initEqWorklet() {
+        if (eqWorkletInitStarted || !audioCtx) return;
+        eqWorkletInitStarted = true;
+
+        if (!audioCtx.audioWorklet || typeof AudioWorkletNode === 'undefined' ||
+            typeof Blob === 'undefined' || !window.URL || !URL.createObjectURL) {
+          useNativeBiquadFallback('AudioWorklet unavailable');
+          return;
+        }
+
+        let url = null;
+        try {
+          const src = computeBiquadCoeffs.toString() + '\n(' + sonaEqWorkletBody.toString() + ')();';
+          url = URL.createObjectURL(new Blob([src], { type: 'application/javascript' }));
+        } catch (err) {
+          useNativeBiquadFallback('could not build worklet module');
+          return;
+        }
+
+        audioCtx.audioWorklet.addModule(url).then(() => {
+          URL.revokeObjectURL(url);
+          const node = new AudioWorkletNode(audioCtx, 'sona-eq', {
+            numberOfInputs: 1,
+            numberOfOutputs: 1,
+            outputChannelCount: [2],
+            channelCount: 2,
+            channelCountMode: 'explicit',
+            channelInterpretation: 'speakers',
+            processorOptions: { bands: buildEqWorkletParams() }
+          });
+          node.onprocessorerror = () => useNativeBiquadFallback('worklet processor error');
+
+          // Swap the native chain out for the worklet in one step.
+          try { preampGainNode.disconnect(biquadNodePool[0]); } catch (e) { /* ignore */ }
+          try { biquadNodePool[biquadNodePool.length - 1].disconnect(postAnalyser); } catch (e) { /* ignore */ }
+          preampGainNode.connect(node);
+          node.connect(postAnalyser);
+          eqWorkletNode = node;
+          engineHonorsShelfQ = true;
+          syncWebAudioBiquadNodes();
+        }).catch((err) => {
+          if (url) URL.revokeObjectURL(url);
+          useNativeBiquadFallback(err && err.message ? err.message : 'worklet load failed');
+        });
       }
 
       function createSynthesizedAudioBuffer(ctx, mode) {
@@ -1348,7 +1632,7 @@
             };
             fittedBands.push(newBand);
 
-            const bMag = computeBandMagnitudeDb(newBand, LOG_FREQS, 48000);
+            const bMag = computeBandMagnitudeDb(newBand, LOG_FREQS, currentSampleRate());
             for (let i = 0; i < NUM_FREQ_POINTS; i++) {
               runningCorrection[i] += bMag[i];
             }
@@ -1680,7 +1964,7 @@
         state.bands.forEach((band, idx) => {
           if (!band.enabled) return;
           const color = BAND_COLORS[idx % BAND_COLORS.length];
-          const bDb = computeBandMagnitudeDb(band, LOG_FREQS, sr);
+          const bDb = getBandCurveDb(band, sr);
           const isFocus = band.id === state.selectedBandId || band.id === hoveredBandId;
 
           ctx2d.beginPath();
@@ -2830,8 +3114,251 @@
         showToast('Saved AI Controller configuration');
       });
 
+      // ====================================================================
+      // 13. ADVANCED EXPORTS: CONVOLUTION IR (.wav), CAMILLADSP (.yml), DSP JSON
+      // All three are rendered from the SAME computeBiquadCoeffs() the graph and the
+      // AudioWorklet use, so shelf Q and linear-Q low/high-pass match what you see and hear.
+      // (A native OfflineAudioContext + BiquadFilterNode chain would NOT: its shelves ignore Q
+      // and its LP/HP read Q in dB.)
+      // ====================================================================
+      const EXPORT_SAMPLE_RATES = [44100, 48000, 96000];
+      let exportSampleRate = 48000;
+
+      // @@export-pure-start
+      function exportIrLength(sr) {
+        return sr > 48000 ? 32768 : 16384; // ~340 ms: long enough for 20 Hz / low-Q filters to decay
+      }
+
+      // Pushes a unit impulse (scaled by the preamp) through every enabled band in series.
+      // Returns a minimum-phase IR as Float64Array. Band enabled flags are honoured; the
+      // global A/B bypass is deliberately ignored so an export always contains the profile.
+      function renderImpulseResponse(bands, preampDb, sr, length) {
+        const ir = new Float64Array(length);
+        ir[0] = Math.pow(10, preampDb / 20);
+        const co = new Float64Array(5);
+
+        bands.forEach((band) => {
+          if (!band.enabled) return;
+          computeBiquadCoeffs(band.filterType, band.frequency, band.gain, band.Q, sr, false, co);
+          const b0 = co[0], b1 = co[1], b2 = co[2], a1 = co[3], a2 = co[4];
+          let z1 = 0, z2 = 0;
+          for (let n = 0; n < length; n++) {
+            const x = ir[n];
+            const y = b0 * x + z1;
+            z1 = b1 * x - a1 * y + z2;
+            z2 = b2 * x - a2 * y;
+            ir[n] = y;
+          }
+        });
+
+        // Short raised-cosine fade on the tail so the truncated IR never clicks.
+        const fade = Math.min(1024, length >> 2);
+        for (let i = 0; i < fade; i++) {
+          ir[length - fade + i] *= 0.5 * (1 + Math.cos(Math.PI * (i + 1) / fade));
+        }
+        return ir;
+      }
+
+      // Mono, 32-bit IEEE float WAV (format tag 3, with the fact chunk non-PCM files should carry).
+      // Equalizer APO's Convolution command applies a mono IR to every channel.
+      function encodeWavFloat32Mono(samples, sr) {
+        const n = samples.length;
+        const dataBytes = n * 4;
+        const buf = new ArrayBuffer(12 + 26 + 12 + 8 + dataBytes);
+        const dv = new DataView(buf);
+        let p = 0;
+        const str = (s) => { for (let i = 0; i < s.length; i++) dv.setUint8(p++, s.charCodeAt(i)); };
+        const u32 = (v) => { dv.setUint32(p, v, true); p += 4; };
+        const u16 = (v) => { dv.setUint16(p, v, true); p += 2; };
+
+        str('RIFF'); u32(buf.byteLength - 8); str('WAVE');
+        str('fmt '); u32(18);
+        u16(3);          // IEEE float
+        u16(1);          // channels
+        u32(sr);
+        u32(sr * 4);     // byte rate
+        u16(4);          // block align
+        u16(32);         // bits per sample
+        u16(0);          // cbSize
+        str('fact'); u32(4); u32(n);
+        str('data'); u32(dataBytes);
+        for (let i = 0; i < n; i++) { dv.setFloat32(p, samples[i], true); p += 4; }
+        return buf;
+      }
+
+      function fmtNum(v, digits) {
+        return String(Number(Number(v).toFixed(digits)));
+      }
+
+      function camillaBiquadType(t) {
+        return { peaking: 'Peaking', lowshelf: 'Lowshelf', highshelf: 'Highshelf', lowpass: 'Lowpass', highpass: 'Highpass' }[t] || 'Peaking';
+      }
+
+      // CamillaDSP v1+ configuration. Filters use Q (not slope/bandwidth) so they match the graph.
+      function buildCamillaYaml(bands, preampDb, sr, meta) {
+        const active = bands.filter((b) => b.enabled);
+        const L = [];
+        L.push('# SonaDSP -> CamillaDSP config (CamillaDSP v1.0 or newer)');
+        L.push(`# Model: ${meta.model}`);
+        L.push(`# Target: ${meta.target}`);
+        L.push('# EDIT the capture/playback devices below for your own setup.');
+        L.push('');
+        L.push('devices:');
+        L.push(`  samplerate: ${sr}`);
+        L.push('  chunksize: 2048');
+        L.push('  capture:');
+        L.push('    type: Alsa');
+        L.push('    channels: 2');
+        L.push('    device: "hw:Loopback,1"   # <- EDIT: your capture device');
+        L.push('    format: S32LE');
+        L.push('  playback:');
+        L.push('    type: Alsa');
+        L.push('    channels: 2');
+        L.push('    device: "hw:0,0"          # <- EDIT: your DAC / output device');
+        L.push('    format: S32LE');
+        L.push('');
+        L.push('filters:');
+        L.push('  sona_preamp:');
+        L.push('    type: Gain');
+        L.push('    parameters:');
+        L.push(`      gain: ${fmtNum(preampDb, 1)}`);
+        active.forEach((b, i) => {
+          const pass = b.filterType === 'lowpass' || b.filterType === 'highpass';
+          L.push(`  sona_eq_${i + 1}:`);
+          L.push('    type: Biquad');
+          L.push('    parameters:');
+          L.push(`      type: ${camillaBiquadType(b.filterType)}`);
+          L.push(`      freq: ${fmtNum(b.frequency, 1)}`);
+          if (!pass) L.push(`      gain: ${fmtNum(b.gain, 1)}`);
+          L.push(`      q: ${fmtNum(b.Q, 3)}`);
+        });
+        L.push('');
+        L.push('pipeline:');
+        L.push('  - type: Filter');
+        L.push('    channels: [0, 1]');
+        L.push('    names:');
+        L.push('      - sona_preamp');
+        active.forEach((_, i) => L.push(`      - sona_eq_${i + 1}`));
+        L.push('');
+        return L.join('\n');
+      }
+
+      // Structured, tool-agnostic JSON: parameters plus ready-to-use biquad coefficients.
+      // Sign convention: y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]  (a0 = 1)
+      function buildDspJson(bands, preampDb, sr, meta) {
+        const co = new Float64Array(5);
+        return {
+          format: 'SonaDSP-parametric-eq',
+          version: 1,
+          model: meta.model,
+          target: meta.target,
+          sampleRate: sr,
+          preampDb: Number(Number(preampDb).toFixed(1)),
+          applyTo: 'all-channels',
+          coefficientConvention: 'normalized (a0 = 1); y[n] = b0*x[n] + b1*x[n-1] + b2*x[n-2] - a1*y[n-1] - a2*y[n-2]',
+          bands: bands.map((b, i) => {
+            computeBiquadCoeffs(b.filterType, b.frequency, b.gain, b.Q, sr, false, co);
+            const pass = b.filterType === 'lowpass' || b.filterType === 'highpass';
+            return {
+              index: i + 1,
+              enabled: !!b.enabled,
+              type: b.filterType,
+              frequencyHz: Math.round(b.frequency * 10) / 10,
+              gainDb: pass ? 0 : Number(Number(b.gain).toFixed(1)),
+              q: Number(Number(b.Q).toFixed(3)),
+              coefficients: { b0: co[0], b1: co[1], b2: co[2], a1: co[3], a2: co[4] }
+            };
+          })
+        };
+      }
+      // @@export-pure-end
+
+      function exportMeta() {
+        const model = state.selectedIemKey === 'custom'
+          ? state.customIemName
+          : (BUILTIN_IEM_PROFILES[state.selectedIemKey]?.name || 'Custom');
+        return { model, target: getTargetLabel() };
+      }
+
+      function exportFileStem() {
+        const m = exportMeta();
+        const raw = `SonaDSP_${m.model}`.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+        return raw.slice(0, 60) || 'SonaDSP_EQ';
+      }
+
+      function downloadBlobFile(data, mime, filename) {
+        const blob = new Blob([data], { type: mime });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      }
+
+      function exportConvolutionWav() {
+        const sr = exportSampleRate;
+        const len = exportIrLength(sr);
+        const ir = renderImpulseResponse(state.bands, state.preampDb, sr, len);
+        const f32 = new Float32Array(len);
+        for (let i = 0; i < len; i++) f32[i] = ir[i];
+        const name = `${exportFileStem()}_${sr / 1000}k_IR.wav`;
+        downloadBlobFile(encodeWavFloat32Mono(f32, sr), 'audio/wav', name);
+        showToast(`Exported ${name} (${(len * 4 / 1024).toFixed(0)} KB, mono 32-bit float)`);
+      }
+
+      function exportCamillaYaml() {
+        const name = `${exportFileStem()}_CamillaDSP.yml`;
+        downloadBlobFile(buildCamillaYaml(state.bands, state.preampDb, exportSampleRate, exportMeta()), 'text/yaml;charset=utf-8', name);
+        showToast(`Exported ${name}`);
+      }
+
+      function exportDspJson() {
+        const name = `${exportFileStem()}_DSP.json`;
+        const obj = buildDspJson(state.bands, state.preampDb, exportSampleRate, exportMeta());
+        downloadBlobFile(JSON.stringify(obj, null, 2), 'application/json', name);
+        showToast(`Exported ${name}`);
+      }
+
+      // The export panel builds itself next to the existing export buttons, so no HTML change is needed.
+      function injectAdvancedExportUi() {
+        if (document.getElementById('advancedExportPanel')) return;
+        const anchor = document.getElementById('btnDownloadPowerampInline')
+          || document.getElementById('btnDownloadApoInline');
+        const host = anchor ? anchor.parentElement : document.getElementById('apoLivePreview')?.parentElement;
+        if (!host) return;
+
+        const btn = 'px-3 py-1.5 rounded-lg text-xs font-bold bg-[#EFEAE1] hover:bg-[#DED8CC] text-[#1E1D1A] border border-[#DED8CC] transition cursor-pointer';
+        const panel = document.createElement('div');
+        panel.id = 'advancedExportPanel';
+        panel.className = 'w-full mt-3 pt-3 border-t border-[#DED8CC] flex flex-wrap items-center gap-2';
+        panel.innerHTML = `
+          <span class="text-xs font-bold text-[#5C5852] mr-1">Advanced export</span>
+          <label class="flex items-center gap-1.5 text-xs font-semibold text-[#5C5852]">
+            Sample rate
+            <select id="exportSrSelect" class="bg-[#FBF9F5] border border-[#DED8CC] rounded-lg px-2 py-1 text-xs font-bold text-[#1E1D1A]">
+              ${EXPORT_SAMPLE_RATES.map((r) => `<option value="${r}" ${r === exportSampleRate ? 'selected' : ''}>${r / 1000} kHz</option>`).join('')}
+            </select>
+          </label>
+          <button type="button" id="btnExportIrWav" class="${btn}" title="Mono 32-bit float impulse response for Equalizer APO, CamillaDSP, Easy Effects and other convolvers">Convolution IR (.wav)</button>
+          <button type="button" id="btnExportCamilla" class="${btn}" title="CamillaDSP v1+ config (edit the audio devices)">CamillaDSP (.yml)</button>
+          <button type="button" id="btnExportDspJson" class="${btn}" title="Parameters + biquad coefficients as JSON">DSP JSON</button>
+        `;
+        host.insertAdjacentElement('afterend', panel);
+
+        document.getElementById('exportSrSelect').addEventListener('change', (e) => {
+          exportSampleRate = parseInt(e.target.value, 10) || 48000;
+        });
+        document.getElementById('btnExportIrWav').addEventListener('click', exportConvolutionWav);
+        document.getElementById('btnExportCamilla').addEventListener('click', exportCamillaYaml);
+        document.getElementById('btnExportDspJson').addEventListener('click', exportDspJson);
+      }
+
       // Initial Boot
       window.addEventListener('load', () => {
+        injectAdvancedExportUi();
         populateIemTargetOptions();
         recomputeAcousticCurves();
         renderBandsTable();
