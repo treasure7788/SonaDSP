@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SonaDSP — Parametric Audio &amp; IEM Workbench</title>
+
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Google Fonts: Plus Jakarta Sans & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@500;600;700&family=Plus+Jakarta+Sans:wght@500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css">
+  <script src="js/app.js" defer></script>
+
+</head>
+<body class="min-h-screen flex flex-col selection:bg-[#C84B31]/20 selection:text-[#1E1D1A]">
+
+  <!-- ======================================================================
+       1. TOP STUDIO HEADER & AUDIO TRANSPORT BAR
+       ====================================================================== -->
+  <header class="bg-[#FBF9F5] border-b border-[#DED8CC] px-5 py-3 sticky top-0 z-30 shadow-2xs">
+    <div class="max-w-[1680px] mx-auto flex flex-wrap items-center justify-between gap-4">
+
+      <!-- Brand Title -->
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-10 rounded-xl bg-[#C84B31] text-[#FBF9F5] flex items-center justify-center shadow-xs">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+            <path d="M2 12h2m4-7v14m4-10v6m4-11v16m4-9v2m2 0h2" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <div>
+          <div class="flex items-center gap-2.5">
+            <h1 class="text-lg font-extrabold tracking-tight text-[#1E1D1A]">
+              SonaDSP
+            </h1>
+            <span class="text-xs font-semibold px-2.5 py-0.5 rounded-md bg-[#EFEAE1] text-[#5C5852] border border-[#DED8CC]">
+              Parametric Audio &amp; IEM Workbench
+            </span>
+          </div>
+          <p id="audioSourceLabel" class="text-xs font-medium text-[#5C5852] truncate max-w-[260px]">
+            Reference Groove (Built-in)
+          </p>
+        </div>
+      </div>
+
+      <!-- Center Integrated Audio Transport -->
+      <div class="flex flex-wrap items-center gap-3 studio-well px-3.5 py-2">
+        <button id="btnPlayPause" type="button" class="flex items-center gap-2 px-4 py-2 rounded-lg bg-[#C84B31] hover:bg-[#AD3B23] text-[#FBF9F5] text-sm font-bold transition cursor-pointer shadow-2xs">
+          <svg id="iconPlay" class="w-4 h-4 fill-current" viewBox="0 0 24 24"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          <svg id="iconPause" class="w-4 h-4 fill-current hidden" viewBox="0 0 24 24"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+          <span id="playBtnText">Play</span>
+        </button>
+
+        <div class="flex items-center gap-2.5 font-mono-num text-xs">
+          <span id="timeCurrent" class="w-9 text-right font-semibold text-[#1E1D1A]">0:00</span>
+          <input id="seekSlider" type="range" min="0" max="8" step="0.02" value="0" class="w-24 sm:w-32" />
+          <span id="timeDuration" class="w-9 text-[#5C5852]">0:08</span>
+        </div>
+
+        <div class="h-5 w-[1px] bg-[#DED8CC] hidden sm:block"></div>
+
+        <!-- Source Selector Pills -->
+        <div class="flex items-center gap-1.5">
+          <button id="btnSourceSynth" type="button" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-[#1E1D1A] text-[#FBF9F5] transition cursor-pointer">
+            Ref Track
+          </button>
+          <button id="btnSourcePink" type="button" class="px-3 py-1.5 rounded-lg text-xs font-bold bg-[#FBF9F5] text-[#5C5852] hover:text-[#1E1D1A] border border-[#DED8CC] transition cursor-pointer">
+            Pink Noise
+          </button>
+
+          <input id="audioFileInput" type="file" accept="audio/*,.flac,.wav,.mp3,.ogg,.m4a,.opus" class="hidden" />
+          <button id="btnLoadAudioFile" type="button" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-[#FBF9F5] hover:bg-[#EFEAE1] text-[#1E1D1A] border border-[#DED8CC] transition cursor-pointer">
+            <svg class="w-3.5 h-3.5 text-[#C84B31]" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/></svg>
+            <span>Load Audio</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Right Actions: A/B Toggle, APO Modal, AI Config -->
+      <div class="flex items-center gap-2.5">
+        <button id="btnAbToggle" type="button" title="Press 'B' to toggle EQ Active vs Flat Bypass" class="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold bg-[#2E644C] text-[#FBF9F5] border border-[#214B38] shadow-2xs transition cursor-pointer">
+          <span id="abDot" class="w-2.5 h-2.5 rounded-full bg-[#A7F3D0]"></span>
+          <span id="abText">EQ Active [A]</span>
+        </button>
+
+        <button id="btnOpenApoModal" type="button" class="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#FBF9F5] hover:bg-[#EFEAE1] text-[#1E1D1A] border border-[#DED8CC] text-sm font-semibold transition cursor-pointer">
+          <svg class="w-4 h-4 text-[#C84B31]" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          <span>Export / Import APO</span>
+        </button>
+
+        <button id="btnOpenAiConfig" type="button" class="flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#FBF9F5] hover:bg-[#EFEAE1] text-[#1E1D1A] border border-[#DED8CC] text-sm font-semibold transition cursor-pointer">
+          <svg class="w-4 h-4 text-[#5C5852]" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          <span>AI Config</span>
+        </button>
+      </div>
+
+    </div>
+  </header>
+
+  <!-- ======================================================================
+       2. INTUITIVE 2-COLUMN STUDIO WORKSPACE
+          [LEFT 7 COLS: GRAPH CANVAS ON TOP + PEQ BANDS BELOW]
+          [RIGHT 5 COLS: AI CONTROLLER & ANALYSIS]
+       ====================================================================== -->
+  <main class="flex-1 max-w-[1680px] w-full mx-auto px-5 py-5">
+    <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+
+      <!-- ==================================================================
+           LEFT COLUMN (7 COLS): GRAPH CARD + PARAMETRIC BANDS TABLE
+           ================================================================== -->
+      <div class="lg:col-span-7 flex flex-col gap-6">
+
+        <!-- ----------------------------------------------------------------
+             CARD 1: INTERACTIVE FREQUENCY RESPONSE & FULL-SCALE FFT CANVAS
+             ---------------------------------------------------------------- -->
+        <section class="studio-card p-5 flex flex-col gap-3.5">
+
+          <!-- Graph Header Bar: Unified IEM & 6,000+ AutoEq Combobox + Target Selector + FFT Controls -->
+          <div class="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[#EFEAE1]">
+
+            <!-- Unified IEM Selector + Searchable 6,000+ AutoEq Popover -->
+            <div class="flex flex-wrap items-center gap-2.5 relative">
+              <div class="flex items-center gap-2">
+                <span class="text-xs font-bold uppercase tracking-wider text-[#5C5852]">IEM / Model:</span>
+                <select id="iemSelect" class="bg-[#F4F0EA] border border-[#DED8CC] rounded-xl px-3 py-1.5 text-sm font-bold text-[#1E1D1A] focus:outline-none focus:border-[#C84B31] cursor-pointer">
+                  <option value="simgot_em6l">Simgot EM6L (711 Coupler)</option>
+                  <option value="crinear_daybreak">CrinEar Daybreak (5128 / DF)</option>
+                  <option value="truthear_hexa">Truthear Hexa</option>
+                  <option value="moondrop_blessing3">Moondrop Blessing 3</option>
+                  <option value="moondrop_variations">Moondrop Variations</option>
+                  <option value="thieaudio_monarch_mk3">Thieaudio Monarch MkIII</option>
+                  <option value="7hz_zero2">7Hz x Crinacle Zero:2</option>
+                  <option value="dunu_davinci">Dunu x Gizaudio DaVinci</option>
+                  <option value="sennheiser_ie200">Sennheiser IE 200</option>
+                  <option value="letshuoer_s12pro">Letshuoer S12 Pro</option>
+                  <option value="sony_ier_m9">Sony IER-M9</option>
+                  <option value="etymotic_er2xr">Etymotic ER2XR</option>
+                  <option value="flat_none">Flat / Track EQ Only</option>
+                </select>
+              </div>
+
+              <!-- Search 6,000+ AutoEq Database Dropdown Trigger -->
+              <div class="relative">
+                <button id="btnToggleAutoEqPopover" type="button" class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#F4F0EA] hover:bg-[#EFEAE1] text-[#1E1D1A] border border-[#DED8CC] text-xs font-bold transition cursor-pointer">
+                  <svg class="w-3.5 h-3.5 text-[#2E644C]" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+                  <span id="autoEqIndexBadge">Search AutoEq DB (6,000+)</span>
+                </button>
+
+                <!-- Floating Searchable Combobox Popover -->
+                <div id="autoEqPopover" class="hidden absolute left-0 top-10 z-40 w-[360px] sm:w-[440px] bg-[#FBF9F5] border border-[#C5BCAE] rounded-2xl shadow-xl p-3.5 space-y-2.5">
+                  <div class="flex items-center justify-between">
+                    <span class="text-xs font-bold text-[#1E1D1A]">Search 6,000+ AutoEq IEMs &amp; Headphones</span>
+                    <button id="btnCloseAutoEqPopover" type="button" class="text-xs font-bold text-[#5C5852] hover:text-[#1E1D1A] px-1.5 cursor-pointer">✕</button>
+                  </div>
+
+                  <div class="flex gap-2">
+                    <input
+                      id="autoEqLiveSearchInput"
+                      type="text"
+                      placeholder="Type model (e.g. Blessing, Variations, Chu, HD 600)..."
+                      class="flex-1 bg-[#F4F0EA] border border-[#DED8CC] rounded-xl px-3 py-2 text-sm font-medium text-[#1E1D1A] focus:outline-none focus:border-[#C84B31]"
+                    />
+                    <select id="sourceFilterSelect" class="bg-[#F4F0EA] border border-[#DED8CC] rounded-xl px-2.5 py-2 text-xs font-bold text-[#1E1D1A] focus:outline-none">
+                      <option value="all">All Rigs</option>
+                      <option value="crinacle">Crinacle</option>
+                      <option value="oratory1990">Oratory1990</option>
+                      <option value="Super Review">Super* Review</option>
+                      <option value="Rtings">Rtings</option>
+                    </select>
+                  </div>
+
+                  <div id="autoEqSearchResultsBox" class="max-h-60 overflow-y-auto divide-y divide-[#EFEAE1] rounded-xl border border-[#DED8CC] bg-[#FCFBF8]"></div>
+
+                  <div class="flex items-center justify-between pt-1 text-xs text-[#5C5852]">
+                    <span>Click any model to load its FR curve</span>
+                    <button id="btnImportFrFile" type="button" class="text-[#C84B31] font-bold hover:underline cursor-pointer">
+                      + Import Local .txt / .csv
+                    </button>
+                    <input id="frFileInput" type="file" accept=".txt,.csv" class="hidden" />
+                  </div>
+                </div>
+              </div>
+
+              <button id="btnLoadOfficialAutoEqPeq" type="button" class="hidden px-2.5 py-1.5 rounded-xl bg-[#2E644C] text-[#FBF9F5] text-xs font-bold cursor-pointer">
+                Apply Official AutoEq PEQ
+              </button>
+            </div>
+
+            <!-- Right Controls: Live FFT Toggle, FFT Boost & Active Band Pill -->
+            <div class="flex flex-wrap items-center gap-3">
+              <div class="flex items-center gap-2 bg-[#F4F0EA] px-3 py-1.5 rounded-xl border border-[#DED8CC]">
+                <label class="flex items-center gap-1.5 text-xs font-bold text-[#1E1D1A] cursor-pointer">
+                  <input id="chkShowFft" type="checkbox" checked class="accent-[#C84B31] w-3.5 h-3.5 cursor-pointer" />
+                  <span>Live FFT</span>
+                </label>
+                <span class="text-[#DED8CC]">|</span>
+                <span class="text-xs font-semibold text-[#5C5852]">Gain</span>
+                <input id="fftGainSlider" type="range" min="0" max="36" step="1" value="14" class="w-16" />
+                <span id="fftGainReadout" class="font-mono-num text-xs font-bold text-[#C97026] w-10 text-right">+14dB</span>
+              </div>
+
+              <div id="activeBandPill" class="font-mono-num bg-[#F4F0EA] px-3 py-1.5 rounded-xl border border-[#DED8CC] text-xs font-bold text-[#1E1D1A]">
+                Band 1 (LSQ): 75 Hz | +2.2 dB | Q 0.71
+              </div>
+            </div>
+          </div>
+
+          <!-- Interactive Dual-Axis Canvas (With Fixed Right Padding = 88px so dBFS labels never clip) -->
+          <div class="relative w-full h-[380px] sm:h-[420px] rounded-xl overflow-hidden border border-[#DED8CC] bg-[#FCFBF8] select-none">
+            <canvas id="acousticCanvas" class="w-full h-full block cursor-crosshair"></canvas>
+
+            <!-- Floating Crosshair Readout -->
+            <div id="cursorReadout" class="pointer-events-none absolute top-3 left-20 bg-[#FBF9F5]/95 border border-[#DED8CC] px-3 py-1 rounded-lg text-xs font-mono-num font-semibold text-[#1E1D1A] shadow-2xs hidden">
+              1000 Hz | Stock: 60.0 dB | Post-EQ: 60.0 dB
+            </div>
+          </div>
+
+          <!-- Compact Bottom Graph Bar: Target Curve + Tilt + Bass Shelf + AutoEQ Button -->
+          <div class="flex flex-wrap items-center justify-between gap-3 pt-1">
+            <!-- Target Pills & Norm -->
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="text-xs font-bold text-[#5C5852]">Target:</span>
+              <select id="targetSelect" class="bg-[#F4F0EA] border border-[#DED8CC] rounded-xl px-3 py-1.5 text-xs font-bold text-[#1E1D1A] focus:outline-none cursor-pointer">
+                <option value="jm1">JM-1 (DF + Tilt)</option>
+                <option value="ief2023">IEF Neutral 2023</option>
+                <option value="harman2019">Harman IE 2019v2</option>
+                <option value="df_5128">Diffuse Field (5128)</option>
+                <option value="none">No Target</option>
+              </select>
+
+              <!-- Compact Tilt & Bass Shelf Sliders -->
+              <div class="flex items-center gap-2 bg-[#F4F0EA] px-3 py-1 rounded-xl border border-[#DED8CC]">
+                <span class="text-xs font-semibold text-[#5C5852]">Tilt</span>
+                <input id="tiltSlider" type="range" min="-1.8" max="1.0" step="0.1" value="-0.8" class="w-16" />
+                <span id="tiltReadout" class="font-mono-num text-xs font-bold text-[#2E644C] w-16 text-right">-0.8dB/o</span>
+              </div>
+
+              <div class="flex items-center gap-2 bg-[#F4F0EA] px-3 py-1 rounded-xl border border-[#DED8CC]">
+                <span class="text-xs font-semibold text-[#5C5852]">Bass</span>
+                <input id="bassShelfSlider" type="range" min="0.0" max="12.0" step="0.5" value="4.5" class="w-16" />
+                <span id="bassShelfReadout" class="font-mono-num text-xs font-bold text-[#2E644C] w-12 text-right">+4.5dB</span>
+              </div>
+
+              <button id="btnResetTargetMods" type="button" class="px-2.5 py-1 rounded-lg bg-[#F4F0EA] hover:bg-[#EFEAE1] border border-[#DED8CC] text-xs font-semibold text-[#5C5852] cursor-pointer" title="Reset Target Tilt & Bass Shelf">
+                Reset
+              </button>
+            </div>
+
+            <!-- Right: Norm Toggle & AutoEQ to Target -->
+            <div class="flex items-center gap-2">
+              <div class="flex items-center bg-[#F4F0EA] p-0.5 rounded-lg border border-[#DED8CC] text-xs font-mono-num">
+                <button id="btnNorm500" type="button" class="px-2 py-1 rounded-md font-bold bg-[#1E1D1A] text-[#FBF9F5] cursor-pointer">500Hz</button>
+                <button id="btnNorm1000" type="button" class="px-2 py-1 rounded-md font-semibold text-[#5C5852] cursor-pointer">1kHz</button>
+              </div>
+
+              <button id="btnAutoEqToTarget" type="button" class="px-3.5 py-1.5 rounded-xl bg-[#C84B31] hover:bg-[#AD3B23] text-[#FBF9F5] text-xs font-bold transition cursor-pointer shadow-2xs">
+                AutoEQ to Target
+              </button>
+            </div>
+          </div>
+
+        </section>
+
+        <!-- ----------------------------------------------------------------
+             CARD 2: PARAMETRIC EQUALIZER BANDS TABLE
+             ---------------------------------------------------------------- -->
+        <section class="studio-card p-5 flex flex-col gap-4">
+
+          <!-- Table Header: Title + Preamp + Add/Reset -->
+          <div class="flex flex-wrap items-center justify-between gap-3 pb-3.5 border-b border-[#EFEAE1]">
+            <div>
+              <h2 class="text-base font-extrabold text-[#1E1D1A] flex items-center gap-2">
+                <span>Parametric Equalizer Bands</span>
+                <span id="activeIemTitleBadge" class="text-xs font-semibold px-2.5 py-0.5 rounded-md bg-[#F4F0EA] text-[#5C5852] border border-[#DED8CC]">
+                  Simgot EM6L (711 Coupler)
+                </span>
+              </h2>
+              <p class="text-xs text-[#5C5852] mt-0.5">
+                Drag handles on the graph above, scroll wheel over a node for Q, or fine-tune below
+              </p>
+            </div>
+
+            <!-- Preamp & Band Actions -->
+            <div class="flex flex-wrap items-center gap-2.5">
+              <div class="flex items-center gap-2 bg-[#F4F0EA] px-3 py-1.5 rounded-xl border border-[#DED8CC]">
+                <span class="text-xs font-bold text-[#5C5852]">Preamp</span>
+                <input id="preampSlider" type="range" min="-15" max="12" step="0.1" value="-3.8" class="w-20" />
+                <span id="preampReadout" class="font-mono-num text-xs font-bold text-[#1E1D1A] w-14 text-right">-3.8 dB</span>
+                <button id="btnAutoPreamp" type="button" class="px-2 py-0.5 rounded-md text-xs font-bold bg-[#2E644C] text-[#FBF9F5] cursor-pointer">
+                  Auto
+                </button>
+              </div>
+
+              <button id="btnAddBand" type="button" class="px-3 py-1.5 rounded-xl bg-[#C84B31] hover:bg-[#AD3B23] text-[#FBF9F5] text-xs font-bold transition cursor-pointer">
+                + Add Band
+              </button>
+
+              <button id="btnInvertBands" type="button" class="px-3 py-1.5 rounded-xl bg-[#F4F0EA] hover:bg-[#EFEAE1] text-[#1E1D1A] border border-[#DED8CC] text-xs font-bold transition cursor-pointer">
+                Invert
+              </button>
+
+              <button id="btnResetBands" type="button" class="px-3 py-1.5 rounded-xl bg-[#F4F0EA] hover:bg-[#EFEAE1] text-[#1E1D1A] border border-[#DED8CC] text-xs font-bold transition cursor-pointer">
+                Reset Flat
+              </button>
+            </div>
+          </div>
+
+          <!-- Dynamic Band Rows -->
+          <div id="bandsTableContainer" class="space-y-2.5"></div>
+
+        </section>
+
+      </div>
+
+      <!-- ==================================================================
+           RIGHT SIDEBAR (5 COLS): AI CONTROLLER & ACOUSTIC ANALYSIS
+           ================================================================== -->
+      <aside class="lg:col-span-5 flex flex-col gap-6">
+
+        <section class="studio-card p-5 flex flex-col gap-4">
+
+          <!-- Header -->
+          <div class="flex items-center justify-between pb-3 border-b border-[#EFEAE1]">
+            <div>
+              <h2 class="text-base font-extrabold text-[#1E1D1A] flex items-center gap-2">
+                <span class="w-2.5 h-2.5 rounded-full bg-[#C84B31]"></span>
+                <span>AI Controller</span>
+              </h2>
+              <p class="text-xs text-[#5C5852]">
+                Describe your target sound or attach a frequency response graph
+              </p>
+            </div>
+
+            <button id="btnUndoAiEq" type="button" class="hidden px-3 py-1.5 rounded-xl bg-[#F4F0EA] hover:bg-[#EFEAE1] text-[#1E1D1A] border border-[#DED8CC] text-xs font-bold cursor-pointer">
+              Undo EQ
+            </button>
+          </div>
+
+          <!-- Sound Shaping Prompt -->
+          <div class="space-y-2">
+            <label for="aiPromptInput" class="block text-sm font-bold text-[#1E1D1A]">
+              Sound Shaping Prompt
+            </label>
+            <textarea
+              id="aiPromptInput"
+              rows="3"
+              class="w-full bg-[#F4F0EA] border border-[#DED8CC] rounded-xl p-3.5 text-[15px] text-[#1E1D1A] placeholder-[#857F75] focus:outline-none focus:border-[#C84B31] focus:bg-[#FBF9F5] transition leading-relaxed resize-none"
+              placeholder="e.g., Match JM-1 target, boost sub-bass shelf by +4.5dB, and tame 4.5kHz glare..."
+            >Match the selected IEM to the custom target curve, keep a warm sub-bass shelf below 80Hz, clean up 240Hz lower-midrange bloat, and smooth out any harsh 4.5kHz–6kHz sibilance peaks.</textarea>
+
+            <!-- Quick Prompt Pills -->
+            <div class="flex flex-wrap gap-1.5 pt-0.5">
+              <button type="button" data-prompt="Match the selected IEM to the custom target curve, keep a warm sub-bass shelf below 80Hz, clean up 240Hz lower-midrange bloat, and smooth out any harsh 4.5kHz–6kHz sibilance peaks." class="quick-prompt-btn px-3 py-1.5 rounded-lg bg-[#F4F0EA] hover:bg-[#EFEAE1] text-[#1E1D1A] border border-[#DED8CC] text-xs font-semibold transition cursor-pointer">
+                Match Target + Warm Sub-Bass
+              </button>
+              <button type="button" data-prompt="Tame harsh 4.2kHz to 5.8kHz upper-midrange glare and sibilance (-3.8dB surgical peaking cuts), keep vocals natural at 2kHz, and add gentle low-shelf warmth." class="quick-prompt-btn px-3 py-1.5 rounded-lg bg-[#F4F0EA] hover:bg-[#EFEAE1] text-[#1E1D1A] border border-[#DED8CC] text-xs font-semibold transition cursor-pointer">
+                Tame 4kHz–6kHz Sibilance
+              </button>
+              <button type="button" data-prompt="Align with IEF Neutral 2023: tight controlled sub-bass shelf below 70Hz, dead-flat lower mids from 150Hz to 800Hz, and natural 3kHz ear gain." class="quick-prompt-btn px-3 py-1.5 rounded-lg bg-[#F4F0EA] hover:bg-[#EFEAE1] text-[#1E1D1A] border border-[#DED8CC] text-xs font-semibold transition cursor-pointer">
+                IEF Neutral Reference
+              </button>
+              <button type="button" data-prompt="Bring vocals forward with rich 1.8kHz–2.5kHz presence, cut 250Hz muddiness, and add airy +2.5dB high-shelf extension above 11kHz." class="quick-prompt-btn px-3 py-1.5 rounded-lg bg-[#F4F0EA] hover:bg-[#EFEAE1] text-[#1E1D1A] border border-[#DED8CC] text-xs font-semibold transition cursor-pointer">
+                Forward Vocals &amp; 11kHz Air
+              </button>
+            </div>
+          </div>
+
+          <!-- Optional FR Graph Screenshot Dropzone -->
+          <div class="space-y-1.5">
+            <div class="flex items-center justify-between">
+              <span class="text-xs font-bold text-[#1E1D1A]">Frequency Graph Screenshot (Optional)</span>
+              <button id="btnClearGraphImg" type="button" class="text-xs text-[#C84B31] font-bold hover:underline hidden cursor-pointer">
+                Remove Image
+              </button>
+            </div>
+            <input id="graphImgInput" type="file" accept="image/*" class="hidden" />
+            <div id="graphDropzone" class="border-2 border-dashed border-[#DED8CC] hover:border-[#C84B31] bg-[#F4F0EA]/60 rounded-xl p-3.5 text-center cursor-pointer transition">
+              <div id="graphDropPrompt" class="text-xs font-semibold text-[#5C5852]">
+                Click to upload a frequency response graph image for vision analysis
+              </div>
+              <img id="graphPreviewImg" alt="Uploaded FR Graph" class="w-full h-24 object-cover rounded-lg hidden" />
+            </div>
+          </div>
+
+          <!-- 10-Band Residual Target Error & Track Spectral Balance -->
+          <div class="studio-well p-3.5 space-y-2">
+            <div class="flex items-center justify-between text-xs">
+              <span class="font-bold text-[#5C5852]">10-Band Target Deviation</span>
+              <span id="telemetrySubtitle" class="font-mono-num font-bold text-[#2E644C] truncate max-w-[200px]">
+                Simgot EM6L vs JM-1
+              </span>
+            </div>
+            <div id="telemetryGrid" class="grid grid-cols-10 gap-1.5 items-end h-14 pt-2 px-2 bg-[#FBF9F5] rounded-lg border border-[#DED8CC]"></div>
+            <div class="flex items-center justify-between text-[11px] font-medium text-[#5C5852]">
+              <span>Green (&lt;1.2dB) • Red (Peak) • Blue (Dip)</span>
+              <span id="ltasStatusText" class="font-mono-num">LTAS Ready</span>
+            </div>
+          </div>
+
+          <!-- Primary Generate & Apply EQ Button -->
+          <button id="btnRunAiController" type="button" class="w-full py-3 px-5 rounded-xl bg-[#C84B31] hover:bg-[#AD3B23] text-[#FBF9F5] text-sm font-bold shadow-xs flex items-center justify-center gap-2 transition cursor-pointer">
+            <span id="aiBtnLabel">Generate &amp; Apply Parametric EQ</span>
+          </button>
+
+          <!-- Tuning Summary Box -->
+          <div class="studio-well p-3.5">
+            <div class="text-xs font-bold uppercase tracking-wider text-[#5C5852] mb-1">
+              Tuning Summary
+            </div>
+            <p id="aiSummaryText" class="text-sm text-[#1E1D1A] leading-relaxed">
+              5-band profile loaded for Simgot EM6L against JM-1 target. Click Play in the top bar and toggle EQ Active [A] / Bypass [B] to compare live.
+            </p>
+          </div>
+
+          <!-- Quick Export Strip -->
+          <div class="pt-2 border-t border-[#EFEAE1] flex flex-wrap items-center justify-between gap-2">
+            <span class="text-xs font-bold text-[#5C5852]">Quick Export:</span>
+            <div class="flex flex-wrap items-center gap-1.5">
+              <button id="btnCopyApoInline" type="button" class="px-3 py-1.5 rounded-lg bg-[#F4F0EA] hover:bg-[#EFEAE1] text-[#1E1D1A] border border-[#DED8CC] text-xs font-bold cursor-pointer">
+                Copy APO .txt
+              </button>
+              <button id="btnDownloadApoInline" type="button" class="px-3 py-1.5 rounded-lg bg-[#1E1D1A] hover:bg-[#33312C] text-[#FBF9F5] text-xs font-bold cursor-pointer">
+                Download .txt
+              </button>
+              <button id="btnDownloadPowerampInline" type="button" class="px-3 py-1.5 rounded-lg bg-[#F4F0EA] hover:bg-[#EFEAE1] text-[#1E1D1A] border border-[#DED8CC] text-xs font-bold cursor-pointer">
+                Poweramp .json
+              </button>
+            </div>
+          </div>
+
+        </section>
+
+      </aside>
+
+    </div>
+  </main>
+
+  <!-- ======================================================================
+       MODAL 1: EQUALIZER APO (.TXT) EXPORT & IMPORT
+       ====================================================================== -->
+  <div id="modalApo" class="fixed inset-0 z-50 bg-[#1E1D1A]/45 backdrop-blur-xs hidden items-center justify-center p-4">
+    <div class="studio-card max-w-2xl w-full p-6 space-y-4 shadow-xl">
+      <div class="flex items-center justify-between border-b border-[#EFEAE1] pb-3">
+        <div>
+          <h3 class="text-base font-extrabold text-[#1E1D1A]">
+            Equalizer APO / Peace (.txt) Configuration
+          </h3>
+          <p class="text-xs text-[#5C5852]">
+            Copy or download your active SonaDSP profile, or paste an existing APO config below
+          </p>
+        </div>
+        <button id="btnCloseApoModal" type="button" class="p-1.5 rounded-lg text-[#5C5852] hover:text-[#1E1D1A] hover:bg-[#EFEAE1] cursor-pointer">✕</button>
+      </div>
+
+      <pre id="apoLivePreview" class="font-mono-num text-xs bg-[#F4F0EA] border border-[#DED8CC] rounded-xl p-3.5 overflow-x-auto text-[#1E1D1A] leading-relaxed max-h-48"></pre>
+
+      <div class="space-y-2 pt-2 border-t border-[#EFEAE1]">
+        <label class="block text-xs font-bold text-[#1E1D1A]">
+          Import Equalizer APO Config
+        </label>
+        <textarea
+          id="apoImportTextarea"
+          rows="4"
+          placeholder="Preamp: -4.2 dB&#10;Filter 1: ON LSC Fc 75 Hz Gain 4.0 dB Q 0.71&#10;Filter 2: ON PK Fc 240 Hz Gain -2.2 dB Q 1.40"
+          class="w-full font-mono-num bg-[#F4F0EA] border border-[#DED8CC] rounded-xl p-3 text-xs text-[#1E1D1A] focus:outline-none focus:border-[#C84B31]"
+        ></textarea>
+        <div class="flex justify-end">
+          <button id="btnApplyApoImport" type="button" class="px-4 py-2 rounded-xl bg-[#C84B31] hover:bg-[#AD3B23] text-[#FBF9F5] text-xs font-bold cursor-pointer">
+            Load Imported Filters
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ======================================================================
+       MODAL 2: AI CONFIG (OPENAI-COMPATIBLE ENDPOINT)
+       ====================================================================== -->
+  <div id="modalAiConfig" class="fixed inset-0 z-50 bg-[#1E1D1A]/45 backdrop-blur-xs hidden items-center justify-center p-4">
+    <div class="studio-card max-w-lg w-full p-6 space-y-4 shadow-xl">
+      <div class="flex items-center justify-between border-b border-[#EFEAE1] pb-3">
+        <div>
+          <h3 class="text-base font-extrabold text-[#1E1D1A]">
+            AI Config
+          </h3>
+          <p class="text-xs text-[#5C5852]">
+            Configure any OpenAI-compatible chat completions endpoint
+          </p>
+        </div>
+        <button id="btnCloseAiConfig" type="button" class="p-1.5 rounded-lg text-[#5C5852] hover:text-[#1E1D1A] hover:bg-[#EFEAE1] cursor-pointer">✕</button>
+      </div>
+
+      <div class="space-y-3 text-sm">
+        <div>
+          <label class="block font-bold text-[#1E1D1A] mb-1 text-xs">Chat Completions Endpoint URL</label>
+          <input id="cfgEndpoint" type="text" value="https://api.openai.com/v1/chat/completions" class="w-full font-mono-num bg-[#F4F0EA] border border-[#DED8CC] rounded-xl px-3.5 py-2 text-xs text-[#1E1D1A]" />
+        </div>
+        <div>
+          <label class="block font-bold text-[#1E1D1A] mb-1 text-xs">Model Identifier</label>
+          <input id="cfgModel" type="text" value="gpt-4o" class="w-full font-mono-num bg-[#F4F0EA] border border-[#DED8CC] rounded-xl px-3.5 py-2 text-xs text-[#1E1D1A]" />
+        </div>
+        <div>
+          <label class="block font-bold text-[#1E1D1A] mb-1 text-xs">API Key (Optional)</label>
+          <input id="cfgApiKey" type="password" placeholder="Leave blank to use Built-In Acoustic Solver" class="w-full font-mono-num bg-[#F4F0EA] border border-[#DED8CC] rounded-xl px-3.5 py-2 text-xs text-[#1E1D1A]" />
+        </div>
+        <label class="flex items-center justify-between p-3 rounded-xl bg-[#F4F0EA] border border-[#DED8CC] cursor-pointer">
+          <div>
+            <div class="font-bold text-xs text-[#1E1D1A]">Built-In Acoustic Target Solver Fallback</div>
+            <div class="text-[11px] text-[#5C5852]">Automatically computes target PEQ bands offline when no API key is set</div>
+          </div>
+          <input id="cfgFallback" type="checkbox" checked class="accent-[#C84B31] w-4 h-4" />
+        </label>
+      </div>
+
+      <div class="flex justify-end pt-1">
+        <button id="btnSaveAiConfig" type="button" class="px-5 py-2 rounded-xl bg-[#C84B31] hover:bg-[#AD3B23] text-[#FBF9F5] text-xs font-bold cursor-pointer">
+          Save &amp; Close
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Non-blocking Toast Notification -->
+  <div id="toastBanner" class="fixed bottom-5 right-5 z-50 bg-[#1E1D1A] text-[#FBF9F5] px-4 py-2.5 rounded-xl shadow-lg text-xs font-bold opacity-0 pointer-events-none translate-y-2">
+    Configuration updated
+  </div>
+  </body>
+</html>
