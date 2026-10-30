@@ -1856,14 +1856,20 @@
                 model: state.modelId,
                 messages,
                 temperature: 0.2
+                max_tokens: 4096
               })
             });
 
-            if (resp.ok) {
-              const data = await resp.json();
-              const raw = (data.choices?.[0]?.message?.content || '').replace(/```json|```/g, '').trim();
-              aiResult = JSON.parse(raw);
+            if (!resp.ok) {
+              const errText = await resp.text();
+              throw new Error(`HTTP ${resp.status}: ${errText.slice(0, 200)}`);
             }
+            const data = await resp.json();
+            let raw = data.choices?.[0]?.message?.content || '';
+            raw = raw.replace(/<think>[\s\S]*?<\/think>/g, '')
+                     .replace(/```json|```/g, '').trim();
+            const start = raw.indexOf('{'), end = raw.lastIndexOf('}');
+            aiResult = JSON.parse(raw.slice(start, end + 1));
           } catch (err) {
             if (!state.useFallback) {
               document.getElementById('aiSummaryText').textContent = `API Error: ${err.message}. Enable Built-In Acoustic Target Solver Fallback in AI Config.`;
