@@ -34,52 +34,20 @@
 * **Poweramp Equalizer (`.json`):** One-click export of formatted parametric band presets compatible with Poweramp Equalizer on Android.
 
 ---
-
-## Repository Structure
-
-SonaDSP runs on standard HTML5, CSS3, and ES6+ Vanilla JavaScript with zero build steps or external bundlers required:
-
 ~~~text
 sonadsp/
-├── index.html   # Studio layout, dual-axis canvas stage, PEQ table, and modals
-├── style.css    # Warm studio color tokens, range sliders, and tabular UI styles
-├── app.js       # Web Audio API DSP chain, RBJ Biquad math, AutoEq fetcher, and AI Controller
-├── README.md    # Project documentation
-└── LICENSE      # MIT License
+├── css/
+│   └── style.css    # Warm studio color tokens, range sliders, and tabular UI styles
+├── js/
+│   └── app.js       # Web Audio API DSP chain, RBJ Biquad math, AutoEq fetcher, and AI Controller
+├── index.html       # Studio layout, dual-axis canvas stage, PEQ table, and modals
+├── LICENSE          # MIT License
+└── README.md        # Project documentation
 ~~~
 
-*(Note: Can also be deployed as a single self-contained `index.html` file.)*
 
 ---
 
-## Getting Started
-
-### 1. Run Locally
-Because SonaDSP uses vanilla JavaScript without a build step, you can clone the repository and open `index.html` directly in any modern browser, or serve the folder locally:
-
-~~~bash
-git clone https://github.com/<your-username>/sonadsp.git
-cd sonadsp
-
-# Optional: start a local static server
-python3 -m http.server 8080
-~~~
-
-Then open `http://localhost:8080` in your browser.
-
-### 2. Deploy on GitHub Pages
-1. Push your repository to GitHub.
-2. Go to **Settings → Pages**.
-3. Under **Build and deployment**, set **Source** to **Deploy from a branch** and select **`main`** (`/root`).
-4. Click **Save**—your workbench will be live at `https://<your-username>.github.io/sonadsp/`.
-
-### 3. Configuring the AI Controller (Optional)
-1. Click **AI Config** in the top-right navigation bar.
-2. Enter any OpenAI-compatible `/v1/chat/completions` endpoint URL, model ID, and API key.
-3. Your configuration is kept strictly in your browser session and is never hardcoded in the repository.
-4. When no API key is entered, SonaDSP automatically uses its **Built-In Acoustic Target Solver** to compute parametric filters locally.
-
----
 
 ## Controls & Shortcuts
 
