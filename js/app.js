@@ -276,7 +276,7 @@
         preampDb: -3.8,
         autoPreamp: true,
         selectedBandId: 'b1',
-        previousBands: null,
+        history: [], // undo stack of band snapshots (most recent last)
 
         showLiveFft: true,
         fftGainOffsetDb: 14,
@@ -378,10 +378,23 @@
           if (key === 'flat_none') return;
           const o = document.createElement('option');
           o.value = `iem:${key}`;
-          o.textContent = p.name;
+          o.textContent = `${p.name} (approx.)`;
           grp.appendChild(o);
         });
         sel.appendChild(grp);
+      }
+
+      // The built-in IEM profiles are smooth synthetic approximations of each model's measured
+      // response, not measurements. Say so in the dropdown; real data comes from the AutoEq search.
+      const APPROX_NOTE = 'Built-in curve is an approximation, not a measurement. Use the AutoEq search for real data.';
+      function labelApproximateIemProfiles() {
+        const sel = document.getElementById('iemSelect');
+        if (!sel) return;
+        Array.from(sel.options).forEach((opt) => {
+          if (opt.value === 'flat_none' || !BUILTIN_IEM_PROFILES[opt.value]) return;
+          if (!opt.textContent.includes('(approx.)')) opt.textContent = `${opt.textContent.trim()} (approx.)`;
+        });
+        sel.title = APPROX_NOTE;
       }
 
       function setCustomIemTarget(curve, name) {
@@ -483,6 +496,17 @@
         }
       }
 
+      // Escapes text before it goes into an innerHTML template. Needed for anything that can come
+      // from outside the app: the AutoEq index, an AI model's band "rationale", imported files.
+      function escapeHtml(value) {
+        return String(value == null ? '' : value)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }
+
       function renderAutoEqSearchResults() {
         const box = document.getElementById('autoEqSearchResultsBox');
         if (!box) return;
@@ -535,9 +559,9 @@
           row.className = 'px-3 py-2 flex items-center justify-between gap-2 hover:bg-[#F4F0EA] transition cursor-pointer';
           row.innerHTML = `
             <div class="min-w-0 flex-1">
-              <div class="text-xs font-bold text-[#1E1D1A] truncate">${item.name}</div>
+              <div class="text-xs font-bold text-[#1E1D1A] truncate">${escapeHtml(item.name)}</div>
               <div class="text-[11px] text-[#5C5852] truncate">
-                <strong class="text-[#2E644C]">${item.source}</strong> • <span class="font-mono-num">${item.rig}</span>
+                <strong class="text-[#2E644C]">${escapeHtml(item.source)}</strong> • <span class="font-mono-num">${escapeHtml(item.rig)}</span>
               </div>
             </div>
             <div class="flex items-center gap-1.5 shrink-0">
@@ -704,7 +728,9 @@
       //   lowpass/highpass : RBJ, LINEAR Q (the native node wants dB; see linearQToNodeDb)
       // ====================================================================
       const EQ_MAX_BANDS = 10;
-      const GAIN_LIMIT_DB = 40; // sanity bound only; the UI limits bands to +/-15 dB
+      const GAIN_LIMIT_DB = 40; // sanity bound only (DSP safety); see BAND_GAIN_LIMIT_DB for the real limit
+      // The one band gain limit used by the sliders, graph dragging, AutoEQ solver and AI results.
+      const BAND_GAIN_LIMIT_DB = 15;
 
       // True while the audio engine really applies shelf Q (AudioWorklet engine).
       // False only if we had to fall back to the native BiquadFilterNode, whose shelves
@@ -1618,7 +1644,7 @@
           }
 
           const rawError = targetSplArray[bestIdx] - (stockIemSplArray[bestIdx] + runningCorrection[bestIdx]);
-          const clampedGain = Number(Math.max(-11.0, Math.min(11.0, rawError * 0.88)).toFixed(1));
+          const clampedGain = Number(Math.max(-BAND_GAIN_LIMIT_DB, Math.min(BAND_GAIN_LIMIT_DB, rawError * 0.88)).toFixed(1));
 
           if (Math.abs(clampedGain) >= 0.3 || idx < 5) {
             const newBand = {
@@ -1643,8 +1669,7 @@
       }
 
       function runAutoEqSolverToCurrentTarget() {
-        state.previousBands = JSON.parse(JSON.stringify(state.bands));
-        document.getElementById('btnUndoAiEq')?.classList.remove('hidden');
+        pushEqHistory();
         state.bands = computeAutoEqBandsForCurrentIem();
         state.selectedBandId = state.bands[0]?.id || 'b1';
         state.isEqActive = true;
@@ -1729,8 +1754,7 @@
         });
 
         if (imported.length > 0) {
-          state.previousBands = JSON.parse(JSON.stringify(state.bands));
-          document.getElementById('btnUndoAiEq')?.classList.remove('hidden');
+          pushEqHistory();
           state.bands = imported.slice(0, 10);
           state.selectedBandId = state.bands[0].id;
           syncWebAudioBiquadNodes();
@@ -1745,6 +1769,7 @@
       const canvas = document.getElementById('acousticCanvas');
       const ctx2d = canvas.getContext('2d');
       let draggingBandId = null;
+      let dragHistoryPushed = false; // one undo step per drag, taken on the first real movement
       let hoveredBandId = null;
       let hoverMouseCoords = null;
 
@@ -2127,6 +2152,7 @@
         if (hit) {
           state.selectedBandId = hit.id;
           draggingBandId = hit.id;
+          dragHistoryPushed = false;
           renderBandsTable();
           updateActiveBandPillUi();
         }
@@ -2159,10 +2185,14 @@
           const normX = (pt.x - padLeft) / plotW;
           const normY = (pt.y - padTop) / plotH;
           const newFreq = Math.round(Math.max(20, Math.min(20000, normXToFreq(normX))));
-          const newGain = Number(Math.max(-15, Math.min(15, normYToRelDb(normY))).toFixed(1));
+          const newGain = Number(Math.max(-BAND_GAIN_LIMIT_DB, Math.min(BAND_GAIN_LIMIT_DB, normYToRelDb(normY))).toFixed(1));
 
           const band = state.bands.find((b) => b.id === draggingBandId);
           if (band) {
+            if (!dragHistoryPushed) {
+              pushEqHistory();
+              dragHistoryPushed = true;
+            }
             band.frequency = newFreq;
             if (band.filterType !== 'lowpass' && band.filterType !== 'highpass') {
               band.gain = newGain;
@@ -2178,6 +2208,7 @@
 
       window.addEventListener('mouseup', () => {
         draggingBandId = null;
+        dragHistoryPushed = false;
       });
 
       canvas.addEventListener('mouseleave', () => {
@@ -2191,6 +2222,7 @@
         if (!target) return;
         e.preventDefault();
         const delta = e.deltaY < 0 ? 0.2 : -0.2;
+        beginManualEdit();
         target.Q = Number(Math.max(0.1, Math.min(18.0, target.Q + delta)).toFixed(2));
         syncWebAudioBiquadNodes();
         updateBandRowInputsInPlace(target);
@@ -2313,9 +2345,9 @@
               <div class="sm:col-span-3 flex flex-col gap-1">
                 <div class="flex items-center justify-between text-xs">
                   <span class="font-semibold text-[#5C5852]">Gain (dB)</span>
-                  <input type="number" min="-15" max="15" step="0.1" value="${band.gain}" ${isPass ? 'disabled' : ''} class="band-gain-num font-mono-num w-16 bg-[#FBF9F5] border border-[#DED8CC] rounded-md px-1.5 py-0.5 text-right text-sm font-bold text-[#1E1D1A] disabled:opacity-40" />
+                  <input type="number" min="${-BAND_GAIN_LIMIT_DB}" max="${BAND_GAIN_LIMIT_DB}" step="0.1" value="${band.gain}" ${isPass ? 'disabled' : ''} class="band-gain-num font-mono-num w-16 bg-[#FBF9F5] border border-[#DED8CC] rounded-md px-1.5 py-0.5 text-right text-sm font-bold text-[#1E1D1A] disabled:opacity-40" />
                 </div>
-                <input type="range" min="-15" max="15" step="0.1" value="${band.gain}" ${isPass ? 'disabled' : ''} class="band-gain-rng w-full" />
+                <input type="range" min="${-BAND_GAIN_LIMIT_DB}" max="${BAND_GAIN_LIMIT_DB}" step="0.1" value="${band.gain}" ${isPass ? 'disabled' : ''} class="band-gain-rng w-full" />
               </div>
 
               <!-- Q Factor & Delete (3 cols) -->
@@ -2332,7 +2364,7 @@
                 </button>
               </div>
             </div>
-            ${band.rationale ? `<div class="mt-2 pt-2 border-t border-[#EFEAE1] text-xs font-medium text-[#5C5852]">${band.rationale}</div>` : ''}
+            ${band.rationale ? `<div class="mt-2 pt-2 border-t border-[#EFEAE1] text-xs font-medium text-[#5C5852]">${escapeHtml(band.rationale)}</div>` : ''}
           `;
 
           row.addEventListener('click', (ev) => {
@@ -2343,12 +2375,14 @@
           });
 
           row.querySelector('.band-enable-chk').addEventListener('change', (ev) => {
+            pushEqHistory();
             band.enabled = ev.target.checked;
             syncWebAudioBiquadNodes();
             renderBandsTable();
           });
 
           row.querySelector('.band-type-sel').addEventListener('change', (ev) => {
+            pushEqHistory();
             band.filterType = ev.target.value;
             if (band.filterType === 'lowpass' || band.filterType === 'highpass') band.gain = 0;
             syncWebAudioBiquadNodes();
@@ -2358,11 +2392,13 @@
           const fNum = row.querySelector('.band-freq-num');
           const fRng = row.querySelector('.band-freq-rng');
           fNum.addEventListener('input', (ev) => {
+            beginManualEdit();
             band.frequency = Math.max(20, Math.min(20000, Math.round(Number(ev.target.value) || 20)));
             fRng.value = Math.round(freqToNormX(band.frequency) * 1000);
             syncWebAudioBiquadNodes();
           });
           fRng.addEventListener('input', (ev) => {
+            beginManualEdit();
             band.frequency = Math.round(normXToFreq(Number(ev.target.value) / 1000));
             fNum.value = band.frequency;
             syncWebAudioBiquadNodes();
@@ -2371,11 +2407,13 @@
           const gNum = row.querySelector('.band-gain-num');
           const gRng = row.querySelector('.band-gain-rng');
           gNum.addEventListener('input', (ev) => {
-            band.gain = Math.max(-15, Math.min(15, parseFloat(ev.target.value) || 0));
+            beginManualEdit();
+            band.gain = Math.max(-BAND_GAIN_LIMIT_DB, Math.min(BAND_GAIN_LIMIT_DB, parseFloat(ev.target.value) || 0));
             gRng.value = band.gain;
             syncWebAudioBiquadNodes();
           });
           gRng.addEventListener('input', (ev) => {
+            beginManualEdit();
             band.gain = parseFloat(ev.target.value);
             gNum.value = band.gain;
             syncWebAudioBiquadNodes();
@@ -2384,11 +2422,13 @@
           const qNum = row.querySelector('.band-q-num');
           const qRng = row.querySelector('.band-q-rng');
           qNum.addEventListener('input', (ev) => {
+            beginManualEdit();
             band.Q = Math.max(0.1, Math.min(18.0, parseFloat(ev.target.value) || 0.71));
             qRng.value = band.Q;
             syncWebAudioBiquadNodes();
           });
           qRng.addEventListener('input', (ev) => {
+            beginManualEdit();
             band.Q = parseFloat(ev.target.value);
             qNum.value = band.Q;
             syncWebAudioBiquadNodes();
@@ -2397,6 +2437,7 @@
           row.querySelector('.band-del-btn').addEventListener('click', (ev) => {
             ev.stopPropagation();
             if (state.bands.length <= 1) return;
+            pushEqHistory();
             state.bands = state.bands.filter((b) => b.id !== band.id);
             if (state.selectedBandId === band.id) state.selectedBandId = state.bands[0].id;
             syncWebAudioBiquadNodes();
@@ -2544,7 +2585,7 @@
             if (baseBands[0]) {
               baseBands[0].filterType = 'lowshelf';
               baseBands[0].frequency = 75;
-              baseBands[0].gain = Number(Math.max(-12, Math.min(12, baseBands[0].gain + boost * 0.5)).toFixed(1));
+              baseBands[0].gain = Number(Math.max(-BAND_GAIN_LIMIT_DB, Math.min(BAND_GAIN_LIMIT_DB, baseBands[0].gain + boost * 0.5)).toFixed(1));
               baseBands[0].rationale = 'Warm sub-bass low-shelf foundation';
             }
           }
@@ -2599,15 +2640,14 @@
         }
 
         if (aiResult && Array.isArray(aiResult.bands)) {
-          state.previousBands = JSON.parse(JSON.stringify(state.bands));
-          document.getElementById('btnUndoAiEq')?.classList.remove('hidden');
+          pushEqHistory();
 
           state.bands = aiResult.bands.slice(0, 10).map((b, i) => ({
             id: `ai_${i + 1}_${Date.now()}`,
             enabled: true,
             filterType: FILTER_TYPES.some((t) => t.value === b.filterType) ? b.filterType : 'peaking',
             frequency: Math.round(Math.max(20, Math.min(20000, Number(b.frequency) || 1000))),
-            gain: Number(Math.max(-15, Math.min(15, Number(b.gain) || 0)).toFixed(1)),
+            gain: Number(Math.max(-BAND_GAIN_LIMIT_DB, Math.min(BAND_GAIN_LIMIT_DB, Number(b.gain) || 0)).toFixed(1)),
             Q: Number(Math.max(0.1, Math.min(18, Number(b.Q) || 1.0)).toFixed(2)),
             rationale: b.rationale || 'AI parametric filter'
           }));
@@ -2623,6 +2663,49 @@
 
         btn.disabled = false;
         label.textContent = 'Generate & Apply Parametric EQ';
+      }
+
+      // ====================================================================
+      // 11b. UNDO HISTORY
+      // pushEqHistory(): snapshot the bands before a discrete action (AI/AutoEQ/import/add/invert/...).
+      // beginManualEdit(): same, but coalesces a burst of slider/number/wheel edits into one undo step.
+      // ====================================================================
+      const EQ_HISTORY_MAX = 30;
+      const MANUAL_EDIT_COALESCE_MS = 700;
+      let lastManualEditTs = 0;
+
+      function updateUndoButtonUi() {
+        document.getElementById('btnUndoAiEq')?.classList.toggle('hidden', state.history.length === 0);
+      }
+
+      function pushEqHistory() {
+        state.history.push(JSON.parse(JSON.stringify(state.bands)));
+        if (state.history.length > EQ_HISTORY_MAX) state.history.shift();
+        lastManualEditTs = 0; // the next manual tweak starts a fresh undo step
+        updateUndoButtonUi();
+      }
+
+      function beginManualEdit() {
+        const now = Date.now();
+        if (now - lastManualEditTs > MANUAL_EDIT_COALESCE_MS) pushEqHistory();
+        lastManualEditTs = now;
+      }
+
+      function undoEq() {
+        if (state.history.length === 0) {
+          showToast('Nothing to undo');
+          return;
+        }
+        state.bands = state.history.pop();
+        if (!state.bands.some((b) => b.id === state.selectedBandId)) {
+          state.selectedBandId = state.bands[0]?.id || '';
+        }
+        lastManualEditTs = 0;
+        updateUndoButtonUi();
+        syncWebAudioBiquadNodes();
+        renderBandsTable();
+        const left = state.history.length;
+        showToast(left > 0 ? `Undid last change (${left} more available)` : 'Undid last change');
       }
 
       // ====================================================================
@@ -2818,7 +2901,11 @@
           document.getElementById('btnLoadOfficialAutoEqPeq')?.classList.add('hidden');
           const label = e.target.options[e.target.selectedIndex].text;
           document.getElementById('activeIemTitleBadge').textContent = label;
-          showToast(`Selected ${label}`);
+          showToast(
+            BUILTIN_IEM_PROFILES[state.selectedIemKey] && state.selectedIemKey !== 'flat_none'
+              ? `Selected ${label}. Approximate curve, not a measurement: use AutoEq search for real data.`
+              : `Selected ${label}`
+          );
         }
         syncWebAudioBiquadNodes();
       });
@@ -2944,6 +3031,7 @@
           Q: 1.41,
           rationale: 'Manual parametric filter band'
         };
+        pushEqHistory();
         state.bands.push(newBand);
         state.selectedBandId = newBand.id;
         syncWebAudioBiquadNodes();
@@ -2951,6 +3039,7 @@
       });
 
       document.getElementById('btnInvertBands').addEventListener('click', () => {
+        pushEqHistory();
         state.bands.forEach((b) => { b.gain = Number((-b.gain).toFixed(1)); });
         syncWebAudioBiquadNodes();
         renderBandsTable();
@@ -2958,8 +3047,7 @@
       });
 
       document.getElementById('btnResetBands').addEventListener('click', () => {
-        state.previousBands = JSON.parse(JSON.stringify(state.bands));
-        document.getElementById('btnUndoAiEq')?.classList.remove('hidden');
+        pushEqHistory();
         state.bands.forEach((b) => { b.gain = 0.0; });
         syncWebAudioBiquadNodes();
         renderBandsTable();
@@ -2975,14 +3063,21 @@
 
       document.getElementById('btnRunAiController').addEventListener('click', runAiController);
 
-      document.getElementById('btnUndoAiEq').addEventListener('click', () => {
-        if (!state.previousBands) return;
-        state.bands = state.previousBands;
-        state.previousBands = null;
-        document.getElementById('btnUndoAiEq').classList.add('hidden');
-        syncWebAudioBiquadNodes();
-        renderBandsTable();
-        showToast('Restored previous EQ bands');
+      document.getElementById('btnUndoAiEq').addEventListener('click', undoEq);
+
+      // Ctrl/Cmd+Z undoes the last EQ change (ignored while typing in a text/number field,
+      // where it should keep its normal text-undo meaning).
+      window.addEventListener('keydown', (e) => {
+        if (!(e.ctrlKey || e.metaKey) || e.altKey || e.shiftKey) return;
+        if (e.key.toLowerCase() !== 'z') return;
+        const el = document.activeElement;
+        const tag = el?.tagName;
+        // Sliders and checkboxes keep focus after use, so only real text entry is excluded.
+        const typing = tag === 'TEXTAREA' || tag === 'SELECT' ||
+          (tag === 'INPUT' && !['range', 'checkbox', 'radio', 'button'].includes(el.type));
+        if (typing || state.history.length === 0) return;
+        e.preventDefault();
+        undoEq();
       });
 
       // Optional FR Graph Screenshot Upload
@@ -3041,29 +3136,19 @@
         const iemName = state.selectedIemKey === 'custom'
           ? state.customIemName
           : (BUILTIN_IEM_PROFILES[state.selectedIemKey]?.name || 'SonaDSP');
-        const powerampPreset = [
-          {
-            name: `SonaDSP - ${iemName}`,
-            preamp: state.preampDb,
-            parametric: true,
-            bands: state.bands.map((b, idx) => ({
-              type: b.filterType === 'lowshelf' ? 4 : (b.filterType === 'highshelf' ? 5 : 3),
-              channels: 0,
-              frequency: Math.round(b.frequency),
-              q: Number(b.Q.toFixed(2)),
-              gain: Number(b.gain.toFixed(1)),
-              color: BAND_COLORS[idx % BAND_COLORS.length]
-            }))
-          }
-        ];
-        const blob = new Blob([JSON.stringify(powerampPreset, null, 2)], { type: 'application/json' });
+        const { preset, skipped } = buildPowerampPreset(state.bands, state.preampDb, `SonaDSP - ${iemName}`, BAND_COLORS);
+        const blob = new Blob([JSON.stringify(preset, null, 2)], { type: 'application/json' });
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
         a.download = `SonaDSP_${state.selectedIemKey}_Poweramp.json`;
         a.click();
         URL.revokeObjectURL(url);
-        showToast('Downloaded Poweramp Parametric EQ .json');
+        showToast(
+          skipped.length > 0
+            ? `Downloaded Poweramp .json. Left out ${skipped.length} band${skipped.length > 1 ? 's' : ''} it can't represent: ${skipped.join(', ')}`
+            : 'Downloaded Poweramp Parametric EQ .json'
+        );
       });
 
       // APO Import Modal
@@ -3271,6 +3356,35 @@
           })
         };
       }
+      // Poweramp parametric preset. Only peaking / low shelf / high shelf map to a Poweramp band type
+      // (3 / 4 / 5). Low-pass and high-pass used to be written out as peaking filters, which is wrong,
+      // and disabled bands used to be exported as if they were active. Both are now left out,
+      // and `skipped` lists them (e.g. "band 6 (high-pass)", "band 3 (disabled)") for a warning.
+      function buildPowerampPreset(bands, preampDb, name, colors) {
+        const typeMap = { peaking: 3, lowshelf: 4, highshelf: 5 };
+        const skipped = [];
+        const out = [];
+        bands.forEach((b, idx) => {
+          if (!b.enabled) { skipped.push(`band ${idx + 1} (disabled)`); return; }
+          const t = typeMap[b.filterType];
+          if (t === undefined) {
+            skipped.push(`band ${idx + 1} (${b.filterType === 'lowpass' ? 'low-pass' : 'high-pass'})`);
+            return;
+          }
+          out.push({
+            type: t,
+            channels: 0,
+            frequency: Math.round(b.frequency),
+            q: Number(Number(b.Q).toFixed(2)),
+            gain: Number(Number(b.gain).toFixed(1)),
+            color: colors ? colors[idx % colors.length] : undefined
+          });
+        });
+        return {
+          preset: [{ name, preamp: preampDb, parametric: true, bands: out }],
+          skipped
+        };
+      }
       // @@export-pure-end
 
       function exportMeta() {
@@ -3359,6 +3473,7 @@
       // Initial Boot
       window.addEventListener('load', () => {
         injectAdvancedExportUi();
+        labelApproximateIemProfiles();
         populateIemTargetOptions();
         recomputeAcousticCurves();
         renderBandsTable();
