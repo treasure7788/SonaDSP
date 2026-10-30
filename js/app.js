@@ -265,6 +265,8 @@
         activeAutoEqEntry: null, // Holds { name, relPath, source, rig } when an AutoEq GitHub model is loaded
 
         targetCurveKey: 'jm1',
+        targetCustomCurve: null, // Used when targetCurveKey === 'iem:custom' (AutoEq model set as target)
+        targetCustomName: '',
         targetTiltDbPerOct: -0.8,
         targetBassShelfDb: 4.5,
         normFreqHz: 500,
@@ -308,6 +310,100 @@
       const stockIemSplArray = new Float32Array(NUM_FREQ_POINTS);
       const targetSplArray = new Float32Array(NUM_FREQ_POINTS);
       const compositeEqDbArray = new Float32Array(NUM_FREQ_POINTS);
+
+      // ====================================================================
+      // 3b. IEM-AS-TARGET HELPERS
+      // Target keys: 'jm1' | 'ief2023' | 'harman2019' | 'df_5128' | 'none'
+      //              'iem:<builtinKey>'  -> a built-in IEM profile used as the target
+      //              'iem:custom'        -> an AutoEq model loaded via the "Target" button
+      // ====================================================================
+      const TARGET_DEFAULTS = {
+        jm1: { tilt: -0.8, bass: 4.5 },
+        ief2023: { tilt: -0.4, bass: 3.5 },
+        harman2019: { tilt: -0.2, bass: 6.5 },
+        df_5128: { tilt: 0.0, bass: 0.0 }
+      };
+
+      function isIemTarget(key) {
+        return typeof key === 'string' && key.startsWith('iem:');
+      }
+
+      function getTargetLabel() {
+        const k = state.targetCurveKey;
+        if (k === 'iem:custom') return state.targetCustomName || 'Custom IEM';
+        if (isIemTarget(k)) return BUILTIN_IEM_PROFILES[k.slice(4)]?.name || 'IEM';
+        return k.toUpperCase();
+      }
+
+      function getTargetDefaults(key) {
+        if (key === 'none') return null;
+        if (isIemTarget(key)) return { tilt: 0.0, bass: 0.0 };
+        return TARGET_DEFAULTS[key] || { tilt: 0.0, bass: 0.0 };
+      }
+
+      function evalIemTargetRaw(i) {
+        const k = state.targetCurveKey;
+        const f = LOG_FREQS[i];
+        let base = 0;
+        if (k === 'iem:custom') {
+          base = state.targetCustomCurve ? state.targetCustomCurve[i] : 0;
+        } else {
+          base = BUILTIN_IEM_PROFILES[k.slice(4)]?.evalDb(f) ?? 0;
+        }
+        const bass = state.targetBassShelfDb / (1 + Math.pow(f / 95, 2.15));
+        const tilt = state.targetTiltDbPerOct * Math.log2(f / 1000);
+        return base + bass + tilt;
+      }
+
+      function syncTargetSlidersUi() {
+        const t = state.targetTiltDbPerOct;
+        const b = state.targetBassShelfDb;
+        const tiltSlider = document.getElementById('tiltSlider');
+        const tiltReadout = document.getElementById('tiltReadout');
+        const bassSlider = document.getElementById('bassShelfSlider');
+        const bassReadout = document.getElementById('bassShelfReadout');
+        if (tiltSlider) tiltSlider.value = t;
+        if (tiltReadout) tiltReadout.textContent = `${t > 0 ? '+' : ''}${t.toFixed(1)} dB/oct`;
+        if (bassSlider) bassSlider.value = b;
+        if (bassReadout) bassReadout.textContent = `${b > 0 ? '+' : ''}${b.toFixed(1)} dB`;
+      }
+
+      function populateIemTargetOptions() {
+        const sel = document.getElementById('targetSelect');
+        if (!sel || sel.querySelector('optgroup[data-iem-targets]')) return;
+        const grp = document.createElement('optgroup');
+        grp.label = 'IEM as target';
+        grp.setAttribute('data-iem-targets', '1');
+        Object.entries(BUILTIN_IEM_PROFILES).forEach(([key, p]) => {
+          if (key === 'flat_none') return;
+          const o = document.createElement('option');
+          o.value = `iem:${key}`;
+          o.textContent = p.name;
+          grp.appendChild(o);
+        });
+        sel.appendChild(grp);
+      }
+
+      function setCustomIemTarget(curve, name) {
+        state.targetCustomCurve = curve;
+        state.targetCustomName = name;
+        state.targetCurveKey = 'iem:custom';
+        state.targetTiltDbPerOct = 0.0;
+        state.targetBassShelfDb = 0.0;
+
+        const sel = document.getElementById('targetSelect');
+        let opt = sel.querySelector('option[value="iem:custom"]');
+        if (!opt) {
+          opt = document.createElement('option');
+          opt.value = 'iem:custom';
+          sel.prepend(opt);
+        }
+        opt.textContent = `AutoEq target: ${name}`;
+        sel.value = 'iem:custom';
+
+        syncTargetSlidersUi();
+        syncWebAudioBiquadNodes();
+      }
 
       // ====================================================================
       // 4. ENTIRE AUTOEQ 6,000+ GITHUB LIBRARY INDEXER & FETCHER
@@ -451,6 +547,9 @@
               <button type="button" class="load-both-btn px-2 py-1 rounded-lg bg-[#EFEAE1] hover:bg-[#DED8CC] text-[#1E1D1A] text-[11px] font-bold cursor-pointer" title="Load FR + AutoEq ParametricEQ.txt">
                 +PEQ
               </button>
+              <button type="button" class="load-target-btn px-2 py-1 rounded-lg bg-[#1D5B4C] text-[#FBF9F5] text-[11px] font-bold cursor-pointer" title="Use this model as the target curve">
+                Target
+              </button>
             </div>
           `;
 
@@ -466,6 +565,12 @@
             document.getElementById('autoEqPopover')?.classList.add('hidden');
           });
 
+          row.querySelector('.load-target-btn').addEventListener('click', (e) => {
+            e.stopPropagation();
+            loadModelFromAutoEqGitHub(item, false, true);
+            document.getElementById('autoEqPopover')?.classList.add('hidden');
+          });
+
           row.addEventListener('click', () => {
             loadModelFromAutoEqGitHub(item, false);
             document.getElementById('autoEqPopover')?.classList.add('hidden');
@@ -475,7 +580,7 @@
         });
       }
 
-      async function loadModelFromAutoEqGitHub(entry, alsoLoadOfficialPeq = false) {
+      async function loadModelFromAutoEqGitHub(entry, alsoLoadOfficialPeq = false, asTarget = false) {
         showToast(`Fetching ${entry.name} (${entry.source}) from AutoEq GitHub...`);
         const folderModelSegment = entry.relPath.split('/').pop(); // Already URL-encoded in INDEX.md
         const rawCsvUrls = [
@@ -495,6 +600,12 @@
         }
 
         if (loadedCurve) {
+          if (asTarget) {
+            setCustomIemTarget(loadedCurve, `${entry.name} (${entry.source})`);
+            showToast(`Set ${entry.name} as target`);
+            return;
+          }
+
           state.customIemCurve = loadedCurve;
           state.customIemName = `${entry.name} (${entry.source})`;
           state.selectedIemKey = 'custom';
@@ -696,9 +807,14 @@
           }
         }
 
-        // 2. Target Curve (with live Tilt dB/oct + Bass Shelf dB) normalized at normFreqHz
+        // 2. Target Curve (built-in target OR an IEM used as target), normalized at normFreqHz
         if (state.targetCurveKey === 'none') {
           targetSplArray.fill(0);
+        } else if (isIemTarget(state.targetCurveKey)) {
+          const refTarget = evalIemTargetRaw(normIdx);
+          for (let i = 0; i < NUM_FREQ_POINTS; i++) {
+            targetSplArray[i] = evalIemTargetRaw(i) - refTarget;
+          }
         } else {
           const refTarget = evaluateRawTargetDb(
             state.targetCurveKey,
@@ -1050,7 +1166,7 @@
         syncWebAudioBiquadNodes();
         renderBandsTable();
         showToast(
-          `AutoEQ matched to ${state.targetCurveKey.toUpperCase()} (Tilt: ${state.targetTiltDbPerOct} dB/oct, Bass: +${state.targetBassShelfDb} dB)`
+          `AutoEQ matched to ${getTargetLabel()} (Tilt: ${state.targetTiltDbPerOct} dB/oct, Bass: +${state.targetBassShelfDb} dB)`
         );
       }
 
@@ -1150,11 +1266,59 @@
         const rect = canvas.getBoundingClientRect();
         const padLeft = 64;   // Clean room for Left Y-Axis dB labels
         const padRight = 88;  // Generous 88px right margin so '-90 dBFS' & '20 kHz' never touch the border
-        const padTop = 28;
+        // Taller top margin on narrow screens so the legend can wrap onto 2-3 rows
+        const padTop = rect.width >= 800 ? 34 : (rect.width >= 480 ? 52 : 70);
         const padBottom = 42;
         const plotW = Math.max(150, rect.width - padLeft - padRight);
         const plotH = Math.max(120, rect.height - padTop - padBottom);
         return { W: rect.width, H: rect.height, padLeft, padRight, padTop, padBottom, plotW, plotH };
+      }
+
+      // Legend drawn in the top margin: explains every curve on the graph
+      function drawLegend(g) {
+        const { padLeft, plotW } = g;
+        const tgt = getTargetLabel();
+        const items = [];
+        if (state.selectedIemKey !== 'flat_none') {
+          items.push({ label: 'Stock IEM', color: '#6E6A63', width: 2.2, dash: [7, 5] });
+        }
+        if (state.targetCurveKey !== 'none') {
+          items.push({ label: `Target: ${tgt.length > 18 ? tgt.slice(0, 17) + '…' : tgt}`, color: '#1D5B4C', width: 2.6 });
+        }
+        items.push({
+          label: state.isEqActive ? 'Post-EQ' : 'Response (EQ off)',
+          color: state.isEqActive ? '#C83E2B' : '#57534E',
+          width: 3.5
+        });
+        items.push({ label: 'EQ filter', color: 'rgba(35, 87, 137, 0.85)', width: 2.0 });
+        if (state.showLiveFft) {
+          items.push({ label: 'Live FFT', color: 'rgba(217, 119, 36, 0.9)', width: 1.8 });
+        }
+
+        ctx2d.font = '600 11.5px "JetBrains Mono", monospace';
+        ctx2d.textAlign = 'left';
+        const swatchW = 24, gap = 7, itemGap = 18, rowH = 17;
+        let x = padLeft;
+        let y = 12;
+
+        items.forEach((it) => {
+          const w = swatchW + gap + ctx2d.measureText(it.label).width;
+          if (x > padLeft && x + w > padLeft + plotW) {
+            x = padLeft;
+            y += rowH;
+          }
+          ctx2d.beginPath();
+          ctx2d.setLineDash(it.dash || []);
+          ctx2d.strokeStyle = it.color;
+          ctx2d.lineWidth = it.width;
+          ctx2d.moveTo(x, y);
+          ctx2d.lineTo(x + swatchW, y);
+          ctx2d.stroke();
+          ctx2d.setLineDash([]);
+          ctx2d.fillStyle = '#4A463F';
+          ctx2d.fillText(it.label, x + swatchW + gap, y + 4);
+          x += w + itemGap;
+        });
       }
 
       function renderCanvasLoop() {
@@ -1436,6 +1600,9 @@
         ctx2d.strokeStyle = '#B5ADA0';
         ctx2d.lineWidth = 1.5;
         ctx2d.strokeRect(padLeft, padTop, plotW, plotH);
+
+        // Legend (top margin)
+        drawLegend(geom);
 
         ctx2d.restore();
         requestAnimationFrame(renderCanvasLoop);
@@ -1762,7 +1929,7 @@
         const iemName = state.selectedIemKey === 'custom'
           ? state.customIemName
           : (BUILTIN_IEM_PROFILES[state.selectedIemKey]?.name || 'IEM');
-        if (sub) sub.textContent = `${iemName} vs ${state.targetCurveKey.toUpperCase()}`;
+        if (sub) sub.textContent = `${iemName} vs ${getTargetLabel()}`;
 
         grid.innerHTML = '';
         ISO_OCTAVES.forEach((oct) => {
@@ -1793,7 +1960,7 @@
           : (BUILTIN_IEM_PROFILES[state.selectedIemKey]?.name || 'Custom');
         const lines = [
           `# SonaDSP Parametric EQ Profile`,
-          `# Model: ${iemName} | Target: ${state.targetCurveKey.toUpperCase()} (Tilt ${state.targetTiltDbPerOct} dB/oct, Bass +${state.targetBassShelfDb} dB)`,
+          `# Model: ${iemName} | Target: ${getTargetLabel()} (Tilt ${state.targetTiltDbPerOct} dB/oct, Bass +${state.targetBassShelfDb} dB)`,
           `Preamp: ${state.preampDb.toFixed(1)} dB`
         ];
         state.bands.forEach((b, i) => {
@@ -1842,7 +2009,7 @@
               },
               {
                 role: 'user',
-                content: `User Prompt: "${promptText}"\nTarget: ${state.targetCurveKey} (Tilt: ${state.targetTiltDbPerOct} dB/oct, Bass Shelf: +${state.targetBassShelfDb} dB)\nIEM vs Target Error by Octave: [${octaveDeltas}]\nLoaded Track LTAS: [${ltasSummary}]`
+                content: `User Prompt: "${promptText}"\nTarget: ${getTargetLabel()} (Tilt: ${state.targetTiltDbPerOct} dB/oct, Bass Shelf: +${state.targetBassShelfDb} dB)\nIEM vs Target Error by Octave: [${octaveDeltas}]\nLoaded Track LTAS: [${ltasSummary}]`
               }
             ];
 
@@ -1855,7 +2022,7 @@
               body: JSON.stringify({
                 model: state.modelId,
                 messages,
-                temperature: 0.2
+                temperature: 0.2,
                 max_tokens: 4096
               })
             });
@@ -1940,7 +2107,7 @@
             : (BUILTIN_IEM_PROFILES[state.selectedIemKey]?.name || 'Selected IEM');
 
           aiResult = {
-            acousticAnalysis: `Generated ${baseBands.length}-band profile for ${iemTitle} matched to ${state.targetCurveKey.toUpperCase()} (Tilt: ${state.targetTiltDbPerOct} dB/oct, Bass Shelf: +${state.targetBassShelfDb} dB). Applied prompt shaping: "${promptText}".`,
+            acousticAnalysis: `Generated ${baseBands.length}-band profile for ${iemTitle} matched to ${getTargetLabel()} (Tilt: ${state.targetTiltDbPerOct} dB/oct, Bass Shelf: +${state.targetBassShelfDb} dB). Applied prompt shaping: "${promptText}".`,
             bands: baseBands
           };
         }
@@ -2078,10 +2245,13 @@
       });
 
       // Preamp & A/B Toggle
+      const AUTO_PREAMP_ON_CLASS = 'px-2.5 py-1 rounded-md text-[14px] font-bold bg-[#1D5B4C] text-[#FFFDF9] cursor-pointer';
+      const AUTO_PREAMP_OFF_CLASS = 'px-2.5 py-1 rounded-md text-[14px] font-bold bg-[#E5E0D5] text-[#57534E] cursor-pointer';
+
       document.getElementById('preampSlider').addEventListener('input', (e) => {
         state.autoPreamp = false;
         state.preampDb = parseFloat(e.target.value);
-        document.getElementById('btnAutoPreamp').className = 'px-2 py-0.5 rounded-md text-xs font-bold bg-[#EFEAE1] text-[#5C5852] cursor-pointer';
+        document.getElementById('btnAutoPreamp').className = AUTO_PREAMP_OFF_CLASS;
         document.getElementById('preampReadout').textContent = `${state.preampDb > 0 ? '+' : ''}${state.preampDb.toFixed(1)} dB`;
         syncWebAudioBiquadNodes();
       });
@@ -2089,16 +2259,8 @@
       document.getElementById('btnAutoPreamp').addEventListener('click', () => {
         state.autoPreamp = !state.autoPreamp;
         document.getElementById('btnAutoPreamp').className = state.autoPreamp
-          ? 'px-2 py-0.5 rounded-md text-xs font-bold bg-[#2E644C] text-[#FBF9F5] cursor-pointer'
-          : 'px-2 py-0.5 rounded-md text-xs font-bold bg-[#EFEAE1] text-[#5C5852] cursor-pointer';
-        syncWebAudioBiquadNodes();
-      });
-
-      document.getElementById('btnAutoPreamp').addEventListener('click', () => {
-        state.autoPreamp = !state.autoPreamp;
-        document.getElementById('btnAutoPreamp').className = state.autoPreamp
-          ? 'px-2.5 py-1 rounded-md text-[14px] font-bold bg-[#1D5B4C] text-[#FFFDF9] cursor-pointer'
-          : 'px-2.5 py-1 rounded-md text-[14px] font-bold bg-[#E5E0D5] text-[#57534E] cursor-pointer';
+          ? AUTO_PREAMP_ON_CLASS
+          : AUTO_PREAMP_OFF_CLASS;
         syncWebAudioBiquadNodes();
       });
 
@@ -2147,101 +2309,50 @@
       // Target Curve, Target Tilt (dB/oct), Bass Shelf (dB), and Normalization
       document.getElementById('targetSelect').addEventListener('change', (e) => {
         state.targetCurveKey = e.target.value;
-        if (state.targetCurveKey === 'jm1') {
-          state.targetTiltDbPerOct = -0.8;
-          state.targetBassShelfDb = 4.5;
-        } else if (state.targetCurveKey === 'ief2023') {
-          state.targetTiltDbPerOct = -0.4;
-          state.targetBassShelfDb = 3.5;
-        } else if (state.targetCurveKey === 'harman2019') {
-          state.targetTiltDbPerOct = -0.2;
-          state.targetBassShelfDb = 6.5;
-        } else if (state.targetCurveKey === 'df_5128') {
-          state.targetTiltDbPerOct = 0.0;
-          state.targetBassShelfDb = 0.0;
+        const defaults = getTargetDefaults(state.targetCurveKey);
+        if (defaults) {
+          state.targetTiltDbPerOct = defaults.tilt;
+          state.targetBassShelfDb = defaults.bass;
         }
-        document.getElementById('tiltSlider').value = state.targetTiltDbPerOct;
-        document.getElementById('tiltReadout').textContent = `${state.targetTiltDbPerOct > 0 ? '+' : ''}${state.targetTiltDbPerOct.toFixed(1)}dB/o`;
-        document.getElementById('bassShelfSlider').value = state.targetBassShelfDb;
-        document.getElementById('bassShelfReadout').textContent = `+${state.targetBassShelfDb.toFixed(1)}dB`;
+        syncTargetSlidersUi();
         syncWebAudioBiquadNodes();
       });
 
       document.getElementById('tiltSlider').addEventListener('input', (e) => {
         state.targetTiltDbPerOct = parseFloat(e.target.value);
-        const sign = state.targetTiltDbPerOct > 0 ? '+' : '';
-        document.getElementById('tiltReadout').textContent = `${sign}${state.targetTiltDbPerOct.toFixed(1)}dB/o`;
+        syncTargetSlidersUi();
         syncWebAudioBiquadNodes();
       });
 
       document.getElementById('bassShelfSlider').addEventListener('input', (e) => {
         state.targetBassShelfDb = parseFloat(e.target.value);
-        document.getElementById('bassShelfReadout').textContent = `+${state.targetBassShelfDb.toFixed(1)}dB`;
+        syncTargetSlidersUi();
         syncWebAudioBiquadNodes();
       });
 
+      // Resets tilt & bass shelf to the defaults of whichever target is currently selected
       document.getElementById('btnResetTargetMods').addEventListener('click', () => {
-        state.targetTiltDbPerOct = -0.8;
-        state.targetBassShelfDb = 4.5;
-        document.getElementById('tiltSlider').value = -0.8;
-        document.getElementById('tiltReadout').textContent = '-0.8dB/o';
-        document.getElementById('bassShelfSlider').value = 4.5;
-        document.getElementById('bassShelfReadout').textContent = '+4.5dB';
+        const defaults = getTargetDefaults(state.targetCurveKey);
+        if (!defaults) return;
+        state.targetTiltDbPerOct = defaults.tilt;
+        state.targetBassShelfDb = defaults.bass;
+        syncTargetSlidersUi();
         syncWebAudioBiquadNodes();
-        showToast('Reset Target Tilt (-0.8 dB/oct) & Bass Shelf (+4.5 dB)');
+        showToast(`Reset tilt (${defaults.tilt} dB/oct) & bass shelf (${defaults.bass} dB) to ${getTargetLabel()} defaults`);
       });
 
-      document.getElementById('btnNorm500').addEventListener('click', () => {
-        state.normFreqHz = 500;
-        document.getElementById('btnNorm500').className = 'px-2 py-1 rounded-md font-bold bg-[#1E1D1A] text-[#FBF9F5] cursor-pointer';
-        document.getElementById('btnNorm1000').className = 'px-2 py-1 rounded-md font-semibold text-[#5C5852] cursor-pointer';
-        syncWebAudioBiquadNodes();
-      });
+      const NORM_ACTIVE_CLASS = 'px-3 py-1.5 rounded-lg font-mono-num text-[14px] font-bold bg-[#181715] text-[#FFFDF9] cursor-pointer';
+      const NORM_INACTIVE_CLASS = 'px-3 py-1.5 rounded-lg font-mono-num text-[14px] font-bold text-[#57534E] hover:text-[#181715] cursor-pointer';
 
-      document.getElementById('btnNorm1000').addEventListener('click', () => {
-        state.normFreqHz = 1000;
-        document.getElementById('btnNorm1000').className = 'px-2 py-1 rounded-md font-bold bg-[#1E1D1A] text-[#FBF9F5] cursor-pointer';
-        document.getElementById('btnNorm500').className = 'px-2 py-1 rounded-md font-semibold text-[#5C5852] cursor-pointer';
+      function setNormalizationFreq(hz) {
+        state.normFreqHz = hz;
+        document.getElementById('btnNorm500').className = hz === 500 ? NORM_ACTIVE_CLASS : NORM_INACTIVE_CLASS;
+        document.getElementById('btnNorm1000').className = hz === 1000 ? NORM_ACTIVE_CLASS : NORM_INACTIVE_CLASS;
         syncWebAudioBiquadNodes();
-      });
+      }
 
-      document.getElementById('tiltSlider').addEventListener('input', (e) => {
-        state.targetTiltDbPerOct = parseFloat(e.target.value);
-        const sign = state.targetTiltDbPerOct > 0 ? '+' : '';
-        document.getElementById('tiltReadout').textContent = `${sign}${state.targetTiltDbPerOct.toFixed(1)} dB/oct`;
-        syncWebAudioBiquadNodes();
-      });
-
-      document.getElementById('bassShelfSlider').addEventListener('input', (e) => {
-        state.targetBassShelfDb = parseFloat(e.target.value);
-        document.getElementById('bassShelfReadout').textContent = `+${state.targetBassShelfDb.toFixed(1)} dB`;
-        syncWebAudioBiquadNodes();
-      });
-
-      document.getElementById('btnResetTargetMods').addEventListener('click', () => {
-        state.targetTiltDbPerOct = -0.8;
-        state.targetBassShelfDb = 4.5;
-        document.getElementById('tiltSlider').value = -0.8;
-        document.getElementById('tiltReadout').textContent = '-0.8 dB/oct';
-        document.getElementById('bassShelfSlider').value = 4.5;
-        document.getElementById('bassShelfReadout').textContent = '+4.5 dB';
-        syncWebAudioBiquadNodes();
-        showToast('Reset Target Tilt (-0.8 dB/oct) & Bass Shelf (+4.5 dB)');
-      });
-
-      document.getElementById('btnNorm500').addEventListener('click', () => {
-        state.normFreqHz = 500;
-        document.getElementById('btnNorm500').className = 'px-3 py-1.5 rounded-lg font-mono-num text-[14px] font-bold bg-[#181715] text-[#FFFDF9] cursor-pointer';
-        document.getElementById('btnNorm1000').className = 'px-3 py-1.5 rounded-lg font-mono-num text-[14px] font-bold text-[#57534E] hover:text-[#181715] cursor-pointer';
-        syncWebAudioBiquadNodes();
-      });
-
-      document.getElementById('btnNorm1000').addEventListener('click', () => {
-        state.normFreqHz = 1000;
-        document.getElementById('btnNorm1000').className = 'px-3 py-1.5 rounded-lg font-mono-num text-[14px] font-bold bg-[#181715] text-[#FFFDF9] cursor-pointer';
-        document.getElementById('btnNorm500').className = 'px-3 py-1.5 rounded-lg font-mono-num text-[14px] font-bold text-[#57534E] hover:text-[#181715] cursor-pointer';
-        syncWebAudioBiquadNodes();
-      });
+      document.getElementById('btnNorm500').addEventListener('click', () => setNormalizationFreq(500));
+      document.getElementById('btnNorm1000').addEventListener('click', () => setNormalizationFreq(1000));
 
       document.getElementById('btnAutoEqToTarget').addEventListener('click', runAutoEqSolverToCurrentTarget);
 
@@ -2474,6 +2585,7 @@
 
       // Initial Boot
       window.addEventListener('load', () => {
+        populateIemTargetOptions();
         recomputeAcousticCurves();
         renderBandsTable();
         renderTelemetryMatrix();
