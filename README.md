@@ -35,17 +35,15 @@
 
 ---
 
-## Repository Structure
-
-SonaDSP runs on standard HTML5, CSS3, and ES6+ Vanilla JavaScript with zero build steps or external bundlers required:
-
-~~~text
 sonadsp/
-├── index.html   # Studio layout, dual-axis canvas stage, PEQ table, and modals
-├── style.css    # Warm studio color tokens, range sliders, and tabular UI styles
-├── app.js       # Web Audio API DSP chain, RBJ Biquad math, AutoEq fetcher, and AI Controller
-├── README.md    # Project documentation
-└── LICENSE      # MIT License
+├── css/
+│   └── style.css    # Warm studio color tokens, range sliders, and tabular UI styles
+├── js/
+│   └── app.js       # Web Audio API DSP chain, RBJ Biquad math, AutoEq fetcher, and AI Controller
+├── index.html       # Studio layout, dual-axis canvas stage, PEQ table, and modals
+├── LICENSE          # MIT License
+└── README.md        # Project documentation
+
 ~~~
 
 *(Note: Can also be deployed as a single self-contained `index.html` file.)*
