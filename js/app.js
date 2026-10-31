@@ -1037,6 +1037,7 @@
           renderTelemetryMatrix();
           syncWebAudioBiquadNodes();
           initEqWorklet();
+          renderGeneratedAudioMetadataUi('Generated audio \u00b7 Reference groove');
         }
 
         if (audioCtx.state === 'suspended') {
@@ -1589,13 +1590,848 @@
         updateAbLoopUi();
       }
 
+      // ====================================================================
+
+      // AUDIO FILE METADATA (container header parsing)
+
+      // decodeAudioData() cannot tell us the source format: it always resamples to the
+
+      // AudioContext rate and returns 32-bit float, and it DETACHES the ArrayBuffer you pass
+
+      // in. So the header has to be read from the raw bytes BEFORE decoding.
+
+      // @@audio-meta-start
+
+      const MPEG_SAMPLE_RATES = { 3: [44100, 48000, 32000], 2: [22050, 24000, 16000], 0: [11025, 12000, 8000] };
+
+      const MP3_BITRATES_KBPS = {
+
+        // [version class][layer] -> index 1..14. MPEG-1 = 3, MPEG-2/2.5 = 2 (shared table).
+
+        '3-1': [0, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320, 352, 384, 416, 448],
+
+        '3-2': [0, 32, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384],
+
+        '3-3': [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320],
+
+        '2-1': [0, 32, 48, 56, 64, 80, 96, 112, 128, 144, 160, 176, 192, 224, 256],
+
+        '2-2': [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160],
+
+        '2-3': [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160]
+
+      };
+
+      const AAC_SAMPLE_RATES = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+
+
+
+      function fourcc(dv, off) {
+
+        if (off + 4 > dv.byteLength) return '';
+
+        return String.fromCharCode(dv.getUint8(off), dv.getUint8(off + 1), dv.getUint8(off + 2), dv.getUint8(off + 3));
+
+      }
+
+
+
+      // Length of a leading ID3v2 tag (0 if none). MP3 and FLAC files are often prefixed with one.
+
+      function id3v2Length(dv) {
+
+        if (dv.byteLength >= 10 && fourcc(dv, 0).slice(0, 3) === 'ID3') {
+
+          const size = ((dv.getUint8(6) & 0x7f) << 21) | ((dv.getUint8(7) & 0x7f) << 14) |
+
+                       ((dv.getUint8(8) & 0x7f) << 7) | (dv.getUint8(9) & 0x7f);
+
+          return 10 + size + ((dv.getUint8(5) & 0x10) ? 10 : 0);
+
+        }
+
+        return 0;
+
+      }
+
+
+
+      function parseWavInfo(dv) {
+
+        let p = 12;
+
+        while (p + 8 <= dv.byteLength) {
+
+          const id = fourcc(dv, p);
+
+          const size = dv.getUint32(p + 4, true);
+
+          if (id === 'fmt ' && p + 8 + 16 <= dv.byteLength) {
+
+            const d = p + 8;
+
+            let tag = dv.getUint16(d, true);
+
+            const channels = dv.getUint16(d + 2, true);
+
+            const sampleRate = dv.getUint32(d + 4, true);
+
+            const byteRate = dv.getUint32(d + 8, true);
+
+            const bits = dv.getUint16(d + 14, true);
+
+            let validBits = bits;
+
+            if (tag === 0xfffe && size >= 40 && d + 26 <= dv.byteLength) {
+
+              validBits = dv.getUint16(d + 18, true) || bits;
+
+              tag = dv.getUint16(d + 24, true); // first two bytes of the SubFormat GUID
+
+            }
+
+            const isPcm = tag === 1 || tag === 3;
+
+            const names = { 1: 'PCM', 3: 'IEEE float', 2: 'MS ADPCM', 6: 'A-law', 7: '\u00b5-law', 0x11: 'IMA ADPCM', 0x55: 'MP3' };
+
+            return {
+
+              format: `WAV \u00b7 ${names[tag] || `format 0x${tag.toString(16)}`}`,
+
+              codec: 'wav', lossless: isPcm, sampleRate, channels,
+
+              bitDepth: isPcm ? (tag === 3 ? `${bits}-bit float` : (validBits !== bits ? `${validBits}-bit (in ${bits}-bit container)` : `${bits}-bit`)) : null,
+
+              exactBitrateKbps: byteRate > 0 ? (byteRate * 8) / 1000 : null
+
+            };
+
+          }
+
+          p += 8 + size + (size & 1);
+
+        }
+
+        return null;
+
+      }
+
+
+
+      function parseFlacInfo(dv) {
+
+        let p = id3v2Length(dv);
+
+        if (fourcc(dv, p) !== 'fLaC') return null;
+
+        p += 4;
+
+        // STREAMINFO is always the first metadata block (type 0, 34 bytes).
+
+        if (p + 4 + 34 > dv.byteLength || (dv.getUint8(p) & 0x7f) !== 0) return null;
+
+        const d = p + 4;
+
+        const sampleRate = (dv.getUint8(d + 10) << 12) | (dv.getUint8(d + 11) << 4) | (dv.getUint8(d + 12) >> 4);
+
+        const channels = ((dv.getUint8(d + 12) >> 1) & 7) + 1;
+
+        const bits = (((dv.getUint8(d + 12) & 1) << 4) | (dv.getUint8(d + 13) >> 4)) + 1;
+
+        return { format: 'FLAC', codec: 'flac', lossless: true, sampleRate, channels, bitDepth: `${bits}-bit` };
+
+      }
+
+
+
+      function parseMp3Info(dv) {
+
+        const start = id3v2Length(dv);
+
+        const limit = Math.min(dv.byteLength - 4, start + 64 * 1024);
+
+        for (let p = start; p < limit; p++) {
+
+          if (dv.getUint8(p) !== 0xff || (dv.getUint8(p + 1) & 0xe0) !== 0xe0) continue;
+
+          const b1 = dv.getUint8(p + 1), b2 = dv.getUint8(p + 2), b3 = dv.getUint8(p + 3);
+
+          const verBits = (b1 >> 3) & 3;     // 0 = MPEG-2.5, 2 = MPEG-2, 3 = MPEG-1, 1 = reserved
+
+          const layerBits = (b1 >> 1) & 3;   // 1 = Layer III, 2 = Layer II, 3 = Layer I, 0 = ADTS (not MP3)
+
+          const brIdx = b2 >> 4, srIdx = (b2 >> 2) & 3;
+
+          if (verBits === 1 || layerBits === 0 || brIdx === 0 || brIdx === 15 || srIdx === 3) continue;
+
+          const layer = 4 - layerBits;
+
+          const sampleRate = MPEG_SAMPLE_RATES[verBits][srIdx];
+
+          const kbps = MP3_BITRATES_KBPS[`${verBits === 3 ? 3 : 2}-${layer}`][brIdx];
+
+          const pad = (b2 >> 1) & 1;
+
+          const frameLen = layer === 1
+
+            ? (Math.floor((12 * kbps * 1000) / sampleRate) + pad) * 4
+
+            : Math.floor(((layer === 3 && verBits !== 3 ? 72 : 144) * kbps * 1000) / sampleRate) + pad;
+
+          // Reject false syncs: a real frame is followed by another sync word.
+
+          const next = p + frameLen;
+
+          if (next + 2 <= dv.byteLength && !(dv.getUint8(next) === 0xff && (dv.getUint8(next + 1) & 0xe0) === 0xe0)) continue;
+
+          const mono = (b3 >> 6) === 3;
+
+          const sideInfo = verBits === 3 ? (mono ? 17 : 32) : (mono ? 9 : 17);
+
+          const tag = fourcc(dv, p + 4 + sideInfo);
+
+          const vbr = tag === 'Xing' || tag === 'VBRI' || fourcc(dv, p + 36) === 'VBRI';
+
+          const verName = verBits === 3 ? 'MPEG-1' : (verBits === 2 ? 'MPEG-2' : 'MPEG-2.5');
+
+          return {
+
+            format: `MP${layer} \u00b7 ${verName} Layer ${'I'.repeat(layer)}`,
+
+            codec: 'mp3', lossless: false, sampleRate, channels: mono ? 1 : 2, bitDepth: null,
+
+            // A CBR header bitrate is exact. A VBR file's first frame says nothing about the average.
+
+            exactBitrateKbps: tag === 'Xing' || vbr ? null : kbps,
+
+            vbr: vbr && tag !== 'Info'
+
+          };
+
+        }
+
+        return null;
+
+      }
+
+
+
+      function parseAdtsInfo(dv) {
+
+        for (let p = 0; p < Math.min(dv.byteLength - 7, 4096); p++) {
+
+          if (dv.getUint8(p) !== 0xff || (dv.getUint8(p + 1) & 0xf6) !== 0xf0) continue; // sync + layer 00
+
+          const sfIdx = (dv.getUint8(p + 2) >> 2) & 15;
+
+          if (sfIdx > 12) continue;
+
+          const cfg = ((dv.getUint8(p + 2) & 1) << 2) | (dv.getUint8(p + 3) >> 6);
+
+          const profile = ['AAC Main', 'AAC-LC', 'AAC SSR', 'AAC LTP'][dv.getUint8(p + 2) >> 6];
+
+          return {
+
+            format: `AAC (ADTS) \u00b7 ${profile}`, codec: 'aac', lossless: false, bitDepth: null,
+
+            sampleRate: AAC_SAMPLE_RATES[sfIdx], channels: cfg === 7 ? 8 : cfg || null
+
+          };
+
+        }
+
+        return null;
+
+      }
+
+
+
+      function parseOggInfo(dv) {
+
+        // The first page carries the codec's identification header as its first packet.
+
+        if (dv.byteLength < 28 || fourcc(dv, 0) !== 'OggS') return null;
+
+        const p = 27 + dv.getUint8(26);
+
+        if (p + 8 > dv.byteLength) return null;
+
+        if (dv.getUint8(p) === 0x01 && fourcc(dv, p + 1) === 'vorb') { // "\x01vorbis"
+
+          const nominal = dv.getInt32(p + 20, true);
+
+          return {
+
+            format: 'Ogg Vorbis', codec: 'vorbis', lossless: false, bitDepth: null,
+
+            channels: dv.getUint8(p + 11), sampleRate: dv.getUint32(p + 12, true),
+
+            nominalBitrateKbps: nominal > 0 ? nominal / 1000 : null
+
+          };
+
+        }
+
+        if (fourcc(dv, p) === 'Opus' && fourcc(dv, p + 4) === 'Head') {
+
+          // Opus always decodes at 48 kHz; the header only records the rate of the original input.
+
+          return {
+
+            format: 'Ogg Opus', codec: 'opus', lossless: false, bitDepth: null,
+
+            channels: dv.getUint8(p + 9), sampleRate: dv.getUint32(p + 12, true) || 48000,
+
+            opusAlways48k: true
+
+          };
+
+        }
+
+        if (dv.getUint8(p) === 0x7f && fourcc(dv, p + 1) === 'FLAC') {
+
+          // Ogg FLAC: 0x7F "FLAC", ver(2), header count(2), "fLaC", block header(4), STREAMINFO
+
+          const d = p + 13 + 4;
+
+          if (d + 18 > dv.byteLength) return null;
+
+          const bits = (((dv.getUint8(d + 12) & 1) << 4) | (dv.getUint8(d + 13) >> 4)) + 1;
+
+          return {
+
+            format: 'Ogg FLAC', codec: 'flac', lossless: true, bitDepth: `${bits}-bit`,
+
+            sampleRate: (dv.getUint8(d + 10) << 12) | (dv.getUint8(d + 11) << 4) | (dv.getUint8(d + 12) >> 4),
+
+            channels: ((dv.getUint8(d + 12) >> 1) & 7) + 1
+
+          };
+
+        }
+
+        return null;
+
+      }
+
+
+
+      function parseAiffInfo(dv) {
+
+        const form = fourcc(dv, 8);
+
+        if (form !== 'AIFF' && form !== 'AIFC') return null;
+
+        let p = 12;
+
+        const isAifc = form === 'AIFC';
+
+        while (p + 8 <= dv.byteLength) {
+
+          const id = fourcc(dv, p);
+
+          const size = dv.getUint32(p + 4, false);
+
+          if (id === 'COMM' && p + 8 + 18 <= dv.byteLength) {
+
+            const d = p + 8;
+
+            const expo = ((dv.getUint8(d + 8) & 0x7f) << 8) | dv.getUint8(d + 9);
+
+            const mant = dv.getUint32(d + 10, false) * 4294967296 + dv.getUint32(d + 14, false);
+
+            const comp = isAifc && size >= 22 ? fourcc(dv, d + 18) : 'NONE';
+
+            const lossless = comp === 'NONE' || comp === 'sowt' || comp === 'fl32' || comp === 'fl64' || comp === 'in24' || comp === 'in32';
+
+            const bits = dv.getUint16(d + 6, false);
+
+            return {
+
+              format: isAifc ? `AIFF-C${comp !== 'NONE' ? ' \u00b7 ' + comp : ''}` : 'AIFF',
+
+              codec: 'aiff', lossless, channels: dv.getUint16(d, false),
+
+              sampleRate: Math.round(mant * Math.pow(2, expo - 16383 - 63)),
+
+              bitDepth: lossless ? (comp === 'fl32' || comp === 'fl64' ? `${bits}-bit float` : `${bits}-bit`) : null,
+
+              exactBitrateKbps: lossless && bits ? (Math.round(mant * Math.pow(2, expo - 16383 - 63)) * dv.getUint16(d, false) * bits) / 1000 : null
+
+            };
+
+          }
+
+          p += 8 + size + (size & 1);
+
+        }
+
+        return null;
+
+      }
+
+
+
+      // ISO base media (M4A / MP4 audio): walk the box tree to the first audio sample entry.
+
+      function parseMp4Info(dv) {
+
+        const CONTAINERS = new Set(['moov', 'trak', 'mdia', 'minf', 'stbl']);
+
+        const AUDIO = new Set(['mp4a', 'alac', 'ac-3', 'ec-3', 'Opus', 'fLaC', 'sowt', 'twos', 'lpcm', 'ipcm', 'fpcm']);
+
+        let found = null;
+
+
+
+        function readEsdsObjectType(start, end) {
+
+          // esds = full box (4 bytes) + ES_Descriptor(0x03) containing DecoderConfigDescriptor(0x04)
+
+          const len = (q) => { let n = 0, i = 0; for (; i < 4 && q < end; i++) { const b = dv.getUint8(q++); n = (n << 7) | (b & 0x7f); if (!(b & 0x80)) break; } return [n, q]; };
+
+          let q = start + 4;
+
+          if (q >= end || dv.getUint8(q) !== 0x03) return null;
+
+          [, q] = len(q + 1);
+
+          q += 2;                                   // ES_ID
+
+          const flags = dv.getUint8(q++);
+
+          if (flags & 0x80) q += 2;
+
+          if (flags & 0x40) q += 1 + dv.getUint8(q);
+
+          if (flags & 0x20) q += 2;
+
+          if (q >= end || dv.getUint8(q) !== 0x04) return null;
+
+          [, q] = len(q + 1);
+
+          return q < end ? dv.getUint8(q) : null;
+
+        }
+
+
+
+        function walk(start, end) {
+
+          let p = start;
+
+          while (p + 8 <= end && !found) {
+
+            let size = dv.getUint32(p, false);
+
+            const type = fourcc(dv, p + 4);
+
+            let header = 8;
+
+            if (size === 1) { size = dv.getUint32(p + 8, false) * 4294967296 + dv.getUint32(p + 12, false); header = 16; }
+
+            else if (size === 0) size = end - p;
+
+            if (size < header) size = header;          // malformed: always make progress
+
+            if (p + size > end) size = end - p;        // truncated file: clamp to what exists
+
+            const body = p + header, bodyEnd = p + size;
+
+
+
+            if (CONTAINERS.has(type)) {
+
+              walk(body, bodyEnd);
+
+            } else if (type === 'stsd' && body + 8 <= bodyEnd) {
+
+              // full box: version/flags(4) + entry_count(4), then sample entries as boxes
+
+              let e = body + 8;
+
+              while (e + 36 <= bodyEnd && !found) {
+
+                const eSize = dv.getUint32(e, false);
+
+                const eType = fourcc(dv, e + 4);
+
+                if (AUDIO.has(eType)) {
+
+                  const d = e + 8;
+
+                  const info = {
+
+                    codec: eType, lossless: ['alac', 'fLaC', 'sowt', 'twos', 'lpcm', 'ipcm', 'fpcm'].includes(eType),
+
+                    channels: dv.getUint16(d + 16, false),
+
+                    sampleRate: dv.getUint16(d + 24, false),   // 16.16 fixed point: integer part
+
+                    bitDepth: null, format: eType
+
+                  };
+
+                  const sampleSize = dv.getUint16(d + 18, false);
+
+                  // child boxes start after the 28-byte audio sample entry body
+
+                  let c = d + 28;
+
+                  const eEnd = Math.min(e + eSize, bodyEnd);
+
+                  while (c + 8 <= eEnd) {
+
+                    const cSize = dv.getUint32(c, false);
+
+                    const cType = fourcc(dv, c + 4);
+
+                    if (cSize < 8) break;
+
+                    if (cType === 'esds') {
+
+                      const ot = readEsdsObjectType(c + 8, Math.min(c + cSize, eEnd));
+
+                      if (ot === 0x6b || ot === 0x69) { info.codec = 'mp3'; info.format = 'M4A \u00b7 MP3'; }
+
+                      else if (ot === 0x40 || (ot >= 0x66 && ot <= 0x68)) { info.codec = 'aac'; info.format = 'M4A \u00b7 AAC'; }
+
+                      else info.format = 'M4A \u00b7 MPEG-4 audio';
+
+                    } else if (cType === 'alac' && c + 8 + 24 + 4 <= eEnd) {
+
+                      const a = c + 8 + 4;               // skip box header and the version/flags word
+
+                      info.bitDepth = `${dv.getUint8(a + 5)}-bit`;
+
+                      info.channels = dv.getUint8(a + 9) || info.channels;
+
+                      info.sampleRate = dv.getUint32(a + 20, false) || info.sampleRate;
+
+                    } else if (cType === 'dOps') {
+
+                      info.sampleRate = dv.getUint32(c + 8 + 4, false) || 48000;
+
+                      info.opusAlways48k = true;
+
+                    } else if (cType === 'dfLa') {
+
+                      // fLaC in MP4: full box + metadata block header(4) + STREAMINFO
+
+                      const s = c + 8 + 4 + 4;
+
+                      if (s + 18 <= eEnd) {
+
+                        info.sampleRate = (dv.getUint8(s + 10) << 12) | (dv.getUint8(s + 11) << 4) | (dv.getUint8(s + 12) >> 4);
+
+                        info.channels = ((dv.getUint8(s + 12) >> 1) & 7) + 1;
+
+                        info.bitDepth = `${(((dv.getUint8(s + 12) & 1) << 4) | (dv.getUint8(s + 13) >> 4)) + 1}-bit`;
+
+                      }
+
+                    }
+
+                    c += cSize;
+
+                  }
+
+                  if (eType === 'alac') info.format = 'M4A \u00b7 ALAC';
+
+                  else if (eType === 'ac-3') info.format = 'M4A \u00b7 AC-3';
+
+                  else if (eType === 'ec-3') info.format = 'M4A \u00b7 E-AC-3';
+
+                  else if (eType === 'Opus') info.format = 'MP4 \u00b7 Opus';
+
+                  else if (eType === 'fLaC') info.format = 'MP4 \u00b7 FLAC';
+
+                  else if (info.lossless && !info.bitDepth && sampleSize) info.bitDepth = `${sampleSize}-bit`;
+
+                  if (info.lossless === false) info.bitDepth = null;
+
+                  found = info;
+
+                  return;
+
+                }
+
+                if (eSize < 8) break;
+
+                e += eSize;
+
+              }
+
+            }
+
+            p += size;
+
+          }
+
+        }
+
+
+
+        const brand = fourcc(dv, 8);
+
+        if (fourcc(dv, 4) !== 'ftyp') return null;
+
+        walk(0, dv.byteLength);
+
+        if (found && /^(qt|3gp)/.test(brand) && found.format.startsWith('M4A')) found.format = found.format.replace('M4A', 'MP4');
+
+        return found;
+
+      }
+
+
+
+      // Returns null when nothing recognisable is found. Never throws.
+
+      function parseAudioContainerInfo(arrayBuffer, fileName) {
+
+        try {
+
+          const dv = new DataView(arrayBuffer);
+
+          if (dv.byteLength < 12) return null;
+
+          const head = fourcc(dv, 0);
+
+          const ext = (/\.([a-z0-9]+)$/i.exec(fileName || '') || [])[1]?.toLowerCase() || '';
+
+          if (head === 'RIFF' && fourcc(dv, 8) === 'WAVE') return parseWavInfo(dv);
+
+          if (head === 'FORM') return parseAiffInfo(dv);
+
+          if (head === 'fLaC' || (head.slice(0, 3) === 'ID3' && fourcc(dv, id3v2Length(dv)) === 'fLaC')) return parseFlacInfo(dv);
+
+          if (head === 'OggS') return parseOggInfo(dv);
+
+          if (fourcc(dv, 4) === 'ftyp') return parseMp4Info(dv);
+
+          // MP3 / ADTS AAC: sync-word sniffing, after any ID3v2 tag.
+
+          if (head.slice(0, 3) === 'ID3' || dv.getUint8(0) === 0xff || ext === 'mp3' || ext === 'aac') {
+
+            return parseMp3Info(dv) || parseAdtsInfo(dv);
+
+          }
+
+          return null;
+
+        } catch (err) {
+
+          console.warn('SonaDSP: could not parse audio header:', err);
+
+          return null;
+
+        }
+
+      }
+
+
+
+      function formatHz(hz) {
+
+        if (!Number.isFinite(hz) || hz <= 0) return 'Unavailable';
+
+        return `${Number((hz / 1000).toFixed(3))} kHz`;
+
+      }
+
+
+
+      function formatChannels(n) {
+
+        if (!Number.isFinite(n) || n <= 0) return 'Unavailable';
+
+        if (n === 1) return 'Mono';
+
+        if (n === 2) return 'Stereo';
+
+        return `${n} channels`;
+
+      }
+
+
+
+      // Turns parsed header info + decode results into the display strings. Pure (no DOM).
+
+      function describeAudioMetadata(info, decoded, fileSize, ctxRate) {
+
+        const dur = decoded ? decoded.duration : 0;
+
+        const ch = (info && info.channels) || (decoded ? decoded.numberOfChannels : null);
+
+        const out = {
+
+          format: info ? info.format : 'Unrecognised container (decoded by the browser)',
+
+          sourceRate: info && info.sampleRate ? formatHz(info.sampleRate) : 'Unavailable',
+
+          bitDepth: 'Unavailable',
+
+          bitrate: 'Unavailable',
+
+          channels: formatChannels(ch),
+
+          note: ''
+
+        };
+
+        const notes = [];
+
+
+
+        if (info) {
+
+          if (info.lossless) {
+
+            out.format += ' (lossless)';
+
+            out.bitDepth = info.bitDepth || 'Unavailable';
+
+          } else if (info.codec !== 'wav') {
+
+            out.format += ' (lossy)';
+
+            out.bitDepth = 'N/A (lossy codec)';
+
+          } else {
+
+            out.bitDepth = 'N/A (compressed WAV)';
+
+          }
+
+        }
+
+
+
+        if (info && info.exactBitrateKbps) {
+
+          out.bitrate = `${Math.round(info.exactBitrateKbps)} kbps${info.codec === 'mp3' ? ' (CBR)' : ''}`;
+
+        } else if (fileSize > 0 && dur > 0) {
+
+          // Same estimate the tooltip in index.html describes: includes tags, artwork and overhead.
+
+          out.bitrate = `\u2248 ${Math.round((fileSize * 8) / dur / 1000)} kbps (estimate)`;
+
+          if (info && info.nominalBitrateKbps) out.bitrate += `, nominal ${Math.round(info.nominalBitrateKbps)}`;
+
+          if (info && info.vbr) out.bitrate += ', VBR';
+
+        }
+
+
+
+        if (info && info.sampleRate && ctxRate && Math.round(info.sampleRate) !== Math.round(ctxRate) && !info.opusAlways48k) {
+
+          notes.push(`The browser resampled this ${formatHz(info.sampleRate)} file to ${formatHz(ctxRate)} when decoding. ` +
+
+            'The graph, FFT and EQ run at the playback rate.');
+
+        }
+
+        if (info && info.opusAlways48k) {
+
+          notes.push('Opus always decodes at 48 kHz; the source rate shown is the rate recorded in the file header.');
+
+        }
+
+        if (!info) {
+
+          notes.push('The file decoded, but its header was not recognised, so source rate and bit depth are unavailable.');
+
+        }
+
+        out.note = notes.join(' ');
+
+        return out;
+
+      }
+
+
+
+      function setMetaText(id, text) {
+
+        const el = document.getElementById(id);
+
+        if (el) el.textContent = text;
+
+      }
+
+
+
+      function renderAudioMetadataUi(m) {
+
+        setMetaText('metaFormat', m.format);
+
+        setMetaText('metaSourceRate', m.sourceRate);
+
+        setMetaText('metaBitDepth', m.bitDepth);
+
+        setMetaText('metaBitrate', m.bitrate);
+
+        setMetaText('metaChannels', m.channels);
+
+        setMetaText('metaAudioNote', m.note || '');
+
+        updatePlaybackRateMetaUi();
+
+      }
+
+
+
+      function updatePlaybackRateMetaUi() {
+
+        setMetaText('metaPlaybackRate', audioCtx ? `${formatHz(audioCtx.sampleRate)} (AudioContext)` : 'Start playback to initialize');
+
+      }
+
+
+
+      // Built-in sources (reference groove / pink noise): there is no file, so nothing to parse.
+
+      function renderGeneratedAudioMetadataUi(label) {
+
+        renderAudioMetadataUi({
+
+          format: label || 'Generated audio',
+
+          sourceRate: audioCtx ? `${formatHz(audioCtx.sampleRate)} (generated)` : 'Unavailable',
+
+          bitDepth: '32-bit float (generated)',
+
+          bitrate: 'N/A (generated)',
+
+          channels: 'Stereo',
+
+          note: ''
+
+        });
+
+      }
+
+      // @@audio-meta-end
+
+
+
       // ---------------- Audio file loading (file picker + drag & drop) ----------------
+      let audioLoadSeq = 0; // guards against two quick drops finishing out of order
+
       async function loadAudioFile(file) {
         const ctx = ensureAudioEngine();
+        const seq = ++audioLoadSeq;
         showToast(`Loading ${file.name}...`);
         try {
           const ab = await file.arrayBuffer();
+          // Read the container header BEFORE decoding: decodeAudioData() detaches `ab`, and it
+          // also hides the source rate (it resamples to the AudioContext rate) and bit depth.
+          const info = parseAudioContainerInfo(ab, file.name);
           const decoded = await ctx.decodeAudioData(ab);
+          if (seq !== audioLoadSeq) return; // a newer file was loaded while this one decoded
           audioBuffer = decoded;
           resetAbLoop();
           state.audioSourceType = 'file';
@@ -1607,10 +2443,14 @@
           document.getElementById('btnSourceSynth').className = 'px-3 py-1.5 rounded-lg text-xs font-bold bg-[#FBF9F5] text-[#5C5852] hover:text-[#1E1D1A] border border-[#DED8CC] transition cursor-pointer';
           document.getElementById('btnSourcePink').className = 'px-3 py-1.5 rounded-lg text-xs font-bold bg-[#FBF9F5] text-[#5C5852] hover:text-[#1E1D1A] border border-[#DED8CC] transition cursor-pointer';
           updateTransportDurationUi();
+          renderAudioMetadataUi(describeAudioMetadata(info, decoded, file.size, ctx.sampleRate));
           startAudioPlayback(0);
           showToast(`Loaded ${file.name}`);
         } catch (err) {
-          showToast(`Audio decode error: ${err && err.message ? err.message : 'unsupported file'}`);
+          if (seq !== audioLoadSeq) return;
+          const reason = err && err.message ? err.message : 'unsupported file';
+          setMetaText('metaAudioNote', `Could not decode ${file.name}: ${reason}`);
+          showToast(`Audio decode error: ${reason}`);
         }
       }
 
@@ -2842,6 +3682,7 @@
         document.getElementById('btnSourcePink').className = 'px-3 py-1.5 rounded-lg text-xs font-bold bg-[#FBF9F5] text-[#5C5852] hover:text-[#1E1D1A] border border-[#DED8CC] transition cursor-pointer';
         updateTransportDurationUi();
         if (state.isPlaying) startAudioPlayback(0);
+        renderGeneratedAudioMetadataUi('Generated audio \u00b7 Reference groove');
         showToast('Switched to Reference Synth Groove');
       });
 
@@ -2858,6 +3699,7 @@
         document.getElementById('btnSourceSynth').className = 'px-3 py-1.5 rounded-lg text-xs font-bold bg-[#FBF9F5] text-[#5C5852] hover:text-[#1E1D1A] border border-[#DED8CC] transition cursor-pointer';
         updateTransportDurationUi();
         if (state.isPlaying) startAudioPlayback(0);
+        renderGeneratedAudioMetadataUi('Generated audio \u00b7 Pink noise');
         showToast('Switched to Calibrated Pink Noise');
       });
 
