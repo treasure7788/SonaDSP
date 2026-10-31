@@ -1617,54 +1617,121 @@
       // ====================================================================
       // 7. AUTOEQ SOLVER & CSV / TXT MEASUREMENT PARSERS
       // ====================================================================
-      function computeAutoEqBandsForCurrentIem() {
-        recomputeAcousticCurves();
-
-        const anchorDefs = [
-          { freq: 68, filterType: 'lowshelf', Q: 0.71, label: 'Sub-bass target shelf alignment' },
-          { freq: 205, filterType: 'peaking', Q: 1.30, label: 'Lower-midrange warmth balance' },
-          { freq: 640, filterType: 'peaking', Q: 1.40, label: 'Center midrange linearity' },
-          { freq: 1850, filterType: 'peaking', Q: 1.50, label: 'Upper-midrange pinna rise' },
-          { freq: 3100, filterType: 'peaking', Q: 2.10, label: '3kHz ear-gain target match' },
-          { freq: 4700, filterType: 'peaking', Q: 3.00, label: 'Presence & sibilance region control' },
-          { freq: 8100, filterType: 'peaking', Q: 3.60, label: 'Mid-treble coupler peak correction' },
-          { freq: 12000, filterType: 'highshelf', Q: 0.71, label: 'Upper-treble air alignment' }
-        ];
-
-        const fittedBands = [];
-        const runningCorrection = new Float32Array(NUM_FREQ_POINTS);
-
-        anchorDefs.forEach((anc, idx) => {
-          let bestIdx = 0;
-          let minD = Infinity;
-          for (let i = 0; i < NUM_FREQ_POINTS; i++) {
-            const d = Math.abs(LOG_FREQS[i] - anc.freq);
-            if (d < minD) { minD = d; bestIdx = i; }
+      // Greedy residual placement followed by cyclic coordinate descent. Equal weight
+      // per log-frequency sample gives each octave equal influence on the fit.
+      // Keep full precision internally; only the final UI/export bands are rounded.
+      function fitParametricEq(desiredDb, sr, maxBands = 8) {
+        if (desiredDb.length !== LOG_FREQS.length ||
+            !Array.from(desiredDb).every(Number.isFinite) || !Number.isFinite(sr) || sr < 1000) {
+          throw new Error('Invalid frequency response or sample rate for EQ fitting');
+        }
+        const n = desiredDb.length;
+        const maxFreq = Math.min(MAX_FREQ, sr * 0.49);
+        const trig = getGridTrig(sr);
+        const residual = Float64Array.from(desiredDb);
+        const scratch = new Float64Array(n);
+        const bands = [], curves = [];
+        const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+        // Samples above the usable Nyquist range must not influence the fit.
+        const loss = (r, curve) => {
+          let sum = 0, count = 0;
+          for (let i = 0; i < n; i++) {
+            if (LOG_FREQS[i] > maxFreq) continue;
+            const e = r[i] - (curve ? curve[i] : 0);
+            sum += e * e; count++;
           }
-
-          const rawError = targetSplArray[bestIdx] - (stockIemSplArray[bestIdx] + runningCorrection[bestIdx]);
-          const clampedGain = Number(Math.max(-BAND_GAIN_LIMIT_DB, Math.min(BAND_GAIN_LIMIT_DB, rawError * 0.88)).toFixed(1));
-
-          if (Math.abs(clampedGain) >= 0.3 || idx < 5) {
-            const newBand = {
-              id: `autoeq_${idx + 1}_${Date.now()}`,
-              enabled: true,
-              filterType: anc.filterType,
-              frequency: anc.freq,
-              gain: clampedGain,
-              Q: anc.Q,
-              rationale: anc.label
-            };
-            fittedBands.push(newBand);
-
-            const bMag = computeBandMagnitudeDb(newBand, LOG_FREQS, currentSampleRate());
-            for (let i = 0; i < NUM_FREQ_POINTS; i++) {
-              runningCorrection[i] += bMag[i];
+          return sum / Math.max(1, count);
+        };
+        function refine(seed, r, rounds = 40) {
+          let band = { ...seed };
+          const evaluate = b => {
+            writeBandMagnitudeDb(scratch, b, sr, trig);
+            return loss(r, scratch);
+          };
+          let score = evaluate(band);
+          let steps = [0.5, 0.65, 2]; // octaves, log2(Q), dB
+          for (let round = 0; round < rounds; round++) {
+            let improved = false;
+            for (let axis = 0; axis < 3; axis++) {
+              if (axis === 1 && band.filterType !== 'peaking' && !engineHonorsShelfQ) continue;
+              for (const direction of [-1, 1]) {
+                const trial = { ...band };
+                if (axis === 0) trial.frequency = clamp(band.frequency * 2 ** (direction * steps[0]), MIN_FREQ, maxFreq);
+                if (axis === 1) trial.Q = clamp(band.Q * 2 ** (direction * steps[1]), 0.1, 18);
+                if (axis === 2) trial.gain = clamp(band.gain + direction * steps[2], -BAND_GAIN_LIMIT_DB, BAND_GAIN_LIMIT_DB);
+                const next = evaluate(trial);
+                if (next < score - 1e-9) { band = trial; score = next; improved = true; }
+              }
+            }
+            if (!improved) steps = steps.map(v => v * 0.5);
+            if (steps[2] < 0.01) break;
+          }
+          return { band, score };
+        }
+        function polish(passes) {
+          for (let pass = 0; pass < passes; pass++) {
+            const before = loss(residual);
+            for (let j = 0; j < bands.length; j++) {
+              for (let i = 0; i < n; i++) residual[i] += curves[j][i];
+              bands[j] = refine(bands[j], residual).band;
+              writeBandMagnitudeDb(curves[j], bands[j], sr, trig);
+              for (let i = 0; i < n; i++) residual[i] -= curves[j][i];
+            }
+            if (before - loss(residual) < 1e-5) break;
+          }
+        }
+        const budget = clamp(Math.floor(maxBands) || 0, 0, EQ_MAX_BANDS);
+        for (let k = 0; k < budget; k++) {
+          if (Math.sqrt(loss(residual)) < 0.08) break;
+          // Try the strongest residual extremum and two alternatives, so a
+          // single uncorrectable spike cannot stall the entire fit.
+          const peaks = [];
+          for (let i = 0; i < n && LOG_FREQS[i] <= maxFreq; i++) {
+            const v = Math.abs(residual[i]);
+            if ((i === 0 || v >= Math.abs(residual[i - 1])) &&
+                (i === n - 1 || LOG_FREQS[i + 1] > maxFreq || v >= Math.abs(residual[i + 1]))) peaks.push(i);
+          }
+          peaks.sort((a, b) => Math.abs(residual[b]) - Math.abs(residual[a]));
+          let best = { score: loss(residual), band: null };
+          for (const i of peaks.slice(0, 3)) {
+            for (const Q of [0.7, 2, 6]) {
+              const candidate = refine({ filterType: 'peaking', frequency: LOG_FREQS[i],
+                gain: clamp(residual[i], -BAND_GAIN_LIMIT_DB, BAND_GAIN_LIMIT_DB), Q }, residual);
+              if (candidate.score < best.score) best = candidate;
             }
           }
-        });
+          // Shelves compete on the same full-grid loss as peaks.
+          for (const [filterType, index] of [['lowshelf', 0], ['highshelf', n - 1]]) {
+            let edge = index;
+            while (LOG_FREQS[edge] > maxFreq) edge--;
+            const candidate = refine({ filterType, frequency: filterType === 'lowshelf' ? 100 : Math.min(10000, maxFreq),
+              gain: clamp(residual[edge], -BAND_GAIN_LIMIT_DB, BAND_GAIN_LIMIT_DB), Q: Math.SQRT1_2 }, residual);
+            if (candidate.score < best.score) best = candidate;
+          }
+          if (!best.band || loss(residual) - best.score < 1e-4) break;
+          bands.push(best.band);
+          const curve = writeBandMagnitudeDb(new Float64Array(n), best.band, sr, trig);
+          curves.push(curve);
+          for (let i = 0; i < n; i++) residual[i] -= curve[i];
+          polish(2);
+        }
+        polish(6);
+        return bands.sort((a, b) => a.frequency - b.frequency).map((b, i) => ({
+          ...b, id: `autoeq_${i + 1}_${Date.now()}`, enabled: true,
+          frequency: Math.min(maxFreq, Math.round(b.frequency)), gain: Number(b.gain.toFixed(1)), Q: Number(b.Q.toFixed(2)),
+          rationale: 'Iterative full-response target fit'
+        }));
+      }
 
-        return fittedBands.slice(0, 8);
+      function computeAutoEqBandsForCurrentIem(shapingBands = []) {
+        recomputeAcousticCurves();
+        const desired = Float64Array.from(targetSplArray, (v, i) => v - stockIemSplArray[i]);
+        const sr = currentSampleRate();
+        for (const band of shapingBands) {
+          const curve = computeBandMagnitudeDb(band, LOG_FREQS, sr);
+          for (let i = 0; i < desired.length; i++) desired[i] += curve[i];
+        }
+        return fitParametricEq(desired, sr);
       }
 
       function runAutoEqSolverToCurrentTarget() {
@@ -2620,65 +2687,26 @@
 
         if (!aiResult) {
           await new Promise((r) => setTimeout(r, 280));
-          const baseBands = computeAutoEqBandsForCurrentIem();
           const lower = promptText.toLowerCase();
-
+          const shaping = [];
+          const shape = (filterType, frequency, gain, Q) => shaping.push({ filterType, frequency,
+            gain: Math.max(-BAND_GAIN_LIMIT_DB, Math.min(BAND_GAIN_LIMIT_DB, gain)), Q });
           if (lower.includes('sub-bass') || lower.includes('warm')) {
-            const gainMatch = lower.match(/([+-]?\d+(?:\.\d+)?)\s*db/);
-            const boost = gainMatch ? parseFloat(gainMatch[1]) : 2.5;
-            if (baseBands[0]) {
-              baseBands[0].filterType = 'lowshelf';
-              baseBands[0].frequency = 75;
-              baseBands[0].gain = Number(Math.max(-BAND_GAIN_LIMIT_DB, Math.min(BAND_GAIN_LIMIT_DB, baseBands[0].gain + boost * 0.5)).toFixed(1));
-              baseBands[0].rationale = 'Warm sub-bass low-shelf foundation';
-            }
+            const match = lower.match(/([+-]?\d+(?:\.\d+)?)\s*db/);
+            shape('lowshelf', 75, (match ? parseFloat(match[1]) : 2.5) * 0.5, 0.71);
           }
-
-          if (lower.includes('mud') || lower.includes('bloat') || lower.includes('240') || lower.includes('250')) {
-            const mudBand = baseBands.find((b) => b.frequency >= 180 && b.frequency <= 320);
-            if (mudBand) {
-              mudBand.frequency = 235;
-              mudBand.gain = Number(Math.min(-1.8, mudBand.gain - 1.4).toFixed(1));
-              mudBand.rationale = 'Clean 235Hz lower-midrange bloat';
-            }
-          }
-
-          if (lower.includes('sibilan') || lower.includes('glare') || lower.includes('4.5k') || lower.includes('4k') || lower.includes('harsh')) {
-            const glareBand = baseBands.find((b) => b.frequency >= 4000 && b.frequency <= 6000);
-            if (glareBand) {
-              glareBand.frequency = 4550;
-              glareBand.gain = Number(Math.min(-3.2, glareBand.gain - 1.8).toFixed(1));
-              glareBand.Q = 3.2;
-              glareBand.rationale = 'Surgical cut for 4.55kHz upper-midrange sibilance';
-            }
-          }
-
-          if (lower.includes('vocal') || lower.includes('forward')) {
-            const vocBand = baseBands.find((b) => b.frequency >= 1500 && b.frequency <= 2600);
-            if (vocBand) {
-              vocBand.frequency = 2050;
-              vocBand.gain = Number(Math.max(1.8, vocBand.gain + 1.5).toFixed(1));
-              vocBand.rationale = 'Forward vocal presence & articulation';
-            }
-          }
-
-          if (lower.includes('air') || lower.includes('11k')) {
-            const airBand = baseBands[baseBands.length - 1];
-            if (airBand) {
-              airBand.filterType = 'highshelf';
-              airBand.frequency = 11200;
-              airBand.gain = 2.4;
-              airBand.Q = 0.71;
-              airBand.rationale = '11.2kHz high-shelf air extension';
-            }
-          }
+          if (lower.includes('mud') || lower.includes('bloat') || lower.includes('240') || lower.includes('250')) shape('peaking', 235, -1.8, 1.3);
+          if (lower.includes('sibilan') || lower.includes('glare') || lower.includes('4.5k') || lower.includes('4k') || lower.includes('harsh')) shape('peaking', 4550, -3.2, 3.2);
+          if (lower.includes('vocal') || lower.includes('forward')) shape('peaking', 2050, 1.8, 1.5);
+          if (lower.includes('air') || lower.includes('11k')) shape('highshelf', 11200, 2.4, 0.71);
+          const baseBands = computeAutoEqBandsForCurrentIem(shaping);
 
           const iemTitle = state.selectedIemKey === 'custom'
             ? state.customIemName
             : (BUILTIN_IEM_PROFILES[state.selectedIemKey]?.name || 'Selected IEM');
 
           aiResult = {
-            acousticAnalysis: `Generated ${baseBands.length}-band profile for ${iemTitle} matched to ${getTargetLabel()} (Tilt: ${state.targetTiltDbPerOct} dB/oct, Bass Shelf: +${state.targetBassShelfDb} dB). Applied prompt shaping: "${promptText}".`,
+            acousticAnalysis: `Generated ${baseBands.length}-band profile for ${iemTitle} matched to ${getTargetLabel()} (Tilt: ${state.targetTiltDbPerOct} dB/oct, Bass Shelf: +${state.targetBassShelfDb} dB). Applied ${shaping.length} recognized prompt adjustment(s).`,
             bands: baseBands
           };
         }
