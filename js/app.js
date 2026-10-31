@@ -2449,10 +2449,55 @@
         });
       }
 
+      // Single error score shown above the octave bars. If index.html already has an element with
+      // id="rmsScoreBox" it is used as-is; otherwise one is created just above the bars.
+      function ensureRmsScoreBox() {
+        let box = document.getElementById('rmsScoreBox');
+        if (box) return box;
+        const grid = document.getElementById('telemetryGrid');
+        if (!grid || !grid.parentElement) return null;
+        box = document.createElement('div');
+        box.id = 'rmsScoreBox';
+        box.className = 'w-full flex flex-wrap items-baseline gap-x-3 gap-y-1 mb-2';
+        box.style.flex = '0 0 100%';
+        grid.insertAdjacentElement('beforebegin', box);
+        return box;
+      }
+
+      function renderRmsScore() {
+        const box = ensureRmsScoreBox();
+        if (!box) return;
+        const label = 'RMS error vs target, 100 Hz\u201310 kHz';
+        if (state.targetCurveKey === 'none') {
+          box.innerHTML = `<span class="text-xs font-bold text-[#5C5852]">${label}</span><span class="text-xs font-semibold text-[#57534E]">Pick a target to see the score</span>`;
+          box.title = '';
+          return;
+        }
+        const r = rmsDeviationDb(LOG_FREQS, stockIemSplArray, compositeEqDbArray, targetSplArray);
+        if (!r) { box.innerHTML = ''; return; }
+        // Show one decimal and derive the change from the rounded numbers so the line always adds up.
+        const b = Math.round(r.before * 10) / 10;
+        const a = Math.round(r.after * 10) / 10;
+        const d = Math.round((a - b) * 10) / 10;
+        const color = d <= -0.1 ? '#1D5B4C' : (d >= 0.1 ? '#C83E2B' : '#57534E');
+        const dTxt = d === 0 ? 'no change' : `${d > 0 ? '+' : '\u2212'}${Math.abs(d).toFixed(1)} dB`;
+        box.innerHTML =
+          `<span class="text-xs font-bold text-[#5C5852]">${label}</span>` +
+          `<span class="font-mono-num text-lg font-bold" style="color:#57534E">${b.toFixed(1)}</span>` +
+          `<span class="text-sm font-bold text-[#8A857B]">\u2192</span>` +
+          `<span class="font-mono-num text-lg font-bold" style="color:${color}">${a.toFixed(1)} dB</span>` +
+          `<span class="text-xs font-bold" style="color:${color}">${dTxt}</span>`;
+        box.title =
+          `Root-mean-square gap between the IEM and the target from 100 Hz to 10 kHz, before and after the EQ ` +
+          `(${r.before.toFixed(2)} dB \u2192 ${r.after.toFixed(2)} dB). Every octave counts equally. ` +
+          `Both curves are matched at ${state.normFreqHz === 1000 ? '1 kHz' : '500 Hz'}, so changing that switch changes the score. Lower is better; 0 is a perfect match.`;
+      }
+
       function renderTelemetryMatrix() {
         const grid = document.getElementById('telemetryGrid');
         const sub = document.getElementById('telemetrySubtitle');
         if (!grid) return;
+        renderRmsScore();
 
         const iemName = state.selectedIemKey === 'custom'
           ? state.customIemName
@@ -3386,6 +3431,129 @@
           skipped
         };
       }
+
+      // ------------------------------------------------------------------
+      // Error score: RMS deviation from target.
+      // Every point on the 512-point grid is log-spaced, so a plain mean over the points in
+      // the band weights each octave equally. Both curves are already matched at the
+      // normalization frequency (500 Hz / 1 kHz), which is what makes the number comparable.
+      //   before = RMS(stock - target)
+      //   after  = RMS(stock + EQ - target)
+      // Returns null when no grid point falls inside the band.
+      // Function declaration + default params on purpose: it is called from the telemetry
+      // renderer, which can run before this section's consts are initialised.
+      // ------------------------------------------------------------------
+      function rmsDeviationDb(freqs, stockDb, eqDb, targetDb, loHz = 100, hiHz = 10000) {
+        let n = 0, sumBefore = 0, sumAfter = 0;
+        for (let i = 0; i < freqs.length; i++) {
+          const f = freqs[i];
+          if (f < loHz || f > hiHz) continue;
+          const eb = stockDb[i] - targetDb[i];
+          const ea = eb + eqDb[i];
+          sumBefore += eb * eb;
+          sumAfter += ea * ea;
+          n++;
+        }
+        if (n === 0) return null;
+        return { before: Math.sqrt(sumBefore / n), after: Math.sqrt(sumAfter / n), points: n, loHz, hiHz };
+      }
+
+      // Net magnitude response (dB) of the enabled bands at arbitrary frequencies. Same RBJ
+      // coefficients and the same |H|^2 expansion as writeBandMagnitudeDb(), with shelf Q honoured
+      // (like every other exporter here).
+      function bandsResponseDb(bands, freqsHz, sr) {
+        const out = new Float64Array(freqsHz.length);
+        const co = new Float64Array(5);
+        bands.forEach((band) => {
+          if (!band.enabled) return;
+          computeBiquadCoeffs(band.filterType, band.frequency, band.gain, band.Q, sr, false, co);
+          const b0 = co[0], b1 = co[1], b2 = co[2], a1 = co[3], a2 = co[4];
+          const n0 = b0 * b0 + b1 * b1 + b2 * b2;
+          const n1 = 2 * (b0 * b1 + b1 * b2);
+          const n2 = 2 * b0 * b2;
+          const d0 = 1 + a1 * a1 + a2 * a2;
+          const d1 = 2 * (a1 + a1 * a2);
+          const d2 = 2 * a2;
+          for (let i = 0; i < freqsHz.length; i++) {
+            const w = (2 * Math.PI * freqsHz[i]) / sr;
+            const c1 = Math.cos(w), c2 = Math.cos(2 * w);
+            const num = n0 + n1 * c1 + n2 * c2;
+            const den = d0 + d1 * c1 + d2 * c2;
+            out[i] += 10 * Math.log10(Math.max(1e-12, num / Math.max(1e-12, den)));
+          }
+        });
+        return out;
+      }
+
+      // Wavelet (Android) only accepts its own fixed 127-frequency GraphicEQ grid, copied verbatim
+      // from https://pittvandewitt.github.io/Wavelet/Import/. Its docs warn that adding, changing or
+      // removing a frequency makes the file incompatible, so do not "tidy" this list.
+      const WAVELET_GRAPHICEQ_FREQS = [
+        20, 21, 22, 23, 24, 26, 27, 29, 30, 32, 34, 36, 38, 40, 43, 45, 48, 50, 53, 56, 59, 63, 66, 70, 74, 78,
+        83, 87, 92, 97, 103, 109, 115, 121, 128, 136, 143, 151, 160, 169, 178, 188, 199, 210, 222, 235, 248, 262,
+        277, 292, 309, 326, 345, 364, 385, 406, 429, 453, 479, 506, 534, 565, 596, 630, 665, 703, 743, 784, 829,
+        875, 924, 977, 1032, 1090, 1151, 1216, 1284, 1357, 1433, 1514, 1599, 1689, 1784, 1885, 1991, 2103, 2221,
+        2347, 2479, 2618, 2766, 2921, 3086, 3260, 3443, 3637, 3842, 4058, 4287, 4528, 4783, 5052, 5337, 5637, 5955,
+        6290, 6644, 7018, 7414, 7831, 8272, 8738, 9230, 9749, 10298, 10878, 11490, 12137, 12821, 13543, 14305,
+        15110, 15961, 16860, 17809, 18812, 19871
+      ];
+
+      // One "GraphicEQ: f g; f g; ..." line: the parametric profile sampled on Wavelet's grid.
+      // The preamp is folded into the gains (the AutoEq convention for GraphicEQ files); Wavelet
+      // normalises imported files anyway. Wavelet shows the file name as the profile name.
+      function buildWaveletGraphicEq(bands, preampDb, sr) {
+        const rate = sr || 48000;
+        const resp = bandsResponseDb(bands, WAVELET_GRAPHICEQ_FREQS, rate);
+        const parts = WAVELET_GRAPHICEQ_FREQS.map((f, i) => `${f} ${fmtNum(resp[i] + preampDb, 1)}`);
+        return `GraphicEQ: ${parts.join('; ')}`;
+      }
+
+      // Easy Effects (Linux / PipeWire) output preset: one equalizer#0 plugin in IIR mode.
+      // Every band uses the "APO (DR)" mode, which is Easy Effects' Equalizer APO-compatible biquad,
+      // so Fc / Gain / Q mean what they mean in the APO export and on the graph. The preamp goes to
+      // the equalizer's input-gain. Disabled bands are kept but muted so nothing is lost on a round trip.
+      const EASY_EFFECTS_TYPES = { peaking: 'Bell', lowshelf: 'Lo-shelf', highshelf: 'Hi-shelf', lowpass: 'Lo-pass', highpass: 'Hi-pass' };
+
+      function buildEasyEffectsPreset(bands, preampDb) {
+        const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+        const makeChannel = () => {
+          const ch = {};
+          bands.forEach((b, i) => {
+            const pass = b.filterType === 'lowpass' || b.filterType === 'highpass';
+            ch[`band${i}`] = {
+              frequency: Number(clamp(b.frequency, 20, 20000).toFixed(1)),
+              gain: pass ? 0 : Number(Number(b.gain).toFixed(2)),
+              mode: 'APO (DR)',
+              mute: !b.enabled,
+              q: Number(clamp(b.Q, 0.1, 18).toFixed(3)),
+              slope: 'x1',
+              solo: false,
+              type: EASY_EFFECTS_TYPES[b.filterType] || 'Bell',
+              width: 4.0
+            };
+          });
+          return ch;
+        };
+        return {
+          output: {
+            blocklist: [],
+            'equalizer#0': {
+              balance: 0.0,
+              bypass: false,
+              'input-gain': Number(Number(preampDb).toFixed(1)),
+              left: makeChannel(),
+              mode: 'IIR',
+              'num-bands': bands.length,
+              'output-gain': 0.0,
+              'pitch-left': 0.0,
+              'pitch-right': 0.0,
+              right: makeChannel(),
+              'split-channels': false
+            },
+            plugins_order: ['equalizer#0']
+          }
+        };
+      }
       // @@export-pure-end
 
       function exportMeta() {
@@ -3437,6 +3605,20 @@
         showToast(`Exported ${name}`);
       }
 
+      function exportEasyEffectsPreset() {
+        const name = `${exportFileStem()}_EasyEffects.json`;
+        const obj = buildEasyEffectsPreset(state.bands, state.preampDb);
+        downloadBlobFile(JSON.stringify(obj, null, 2), 'application/json', name);
+        showToast(`Exported ${name}. In Easy Effects, import it from the Presets menu.`);
+      }
+
+      // Wavelet names the imported profile after the file, so keep the name short and readable.
+      function exportWaveletGraphicEq() {
+        const name = `${exportFileStem()}_Wavelet.txt`;
+        downloadBlobFile(buildWaveletGraphicEq(state.bands, state.preampDb, 48000), 'text/plain;charset=utf-8', name);
+        showToast(`Exported ${name}. In Wavelet, open AutoEq and use Import.`);
+      }
+
       // The export panel builds itself next to the existing export buttons, so no HTML change is needed.
       function injectAdvancedExportUi() {
         if (document.getElementById('advancedExportPanel')) return;
@@ -3460,6 +3642,8 @@
           <button type="button" id="btnExportIrWav" class="${btn}" title="Mono 32-bit float impulse response for Equalizer APO, CamillaDSP, Easy Effects and other convolvers">Convolution IR (.wav)</button>
           <button type="button" id="btnExportCamilla" class="${btn}" title="CamillaDSP v1+ config (edit the audio devices)">CamillaDSP (.yml)</button>
           <button type="button" id="btnExportDspJson" class="${btn}" title="Parameters + biquad coefficients as JSON">DSP JSON</button>
+          <button type="button" id="btnExportEasyEffects" class="${btn}" title="Easy Effects (Linux / PipeWire) output preset. Import it from the Presets menu.">Easy Effects (.json)</button>
+          <button type="button" id="btnExportWavelet" class="${btn}" title="127-band GraphicEQ line for Wavelet on Android (AutoEq tab, Import)">Wavelet GraphicEQ (.txt)</button>
         `;
         host.insertAdjacentElement('afterend', panel);
 
@@ -3469,6 +3653,8 @@
         document.getElementById('btnExportIrWav').addEventListener('click', exportConvolutionWav);
         document.getElementById('btnExportCamilla').addEventListener('click', exportCamillaYaml);
         document.getElementById('btnExportDspJson').addEventListener('click', exportDspJson);
+        document.getElementById('btnExportEasyEffects').addEventListener('click', exportEasyEffectsPreset);
+        document.getElementById('btnExportWavelet').addEventListener('click', exportWaveletGraphicEq);
       }
 
 
