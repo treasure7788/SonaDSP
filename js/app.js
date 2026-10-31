@@ -1,6 +1,4 @@
-(function () {
-      'use strict';
-
+// SonaDSP 
       // ====================================================================
       // 1. CONSTANTS & LOGARITHMIC FREQUENCY GRID (512 POINTS, 20Hz - 20kHz)
       // ====================================================================
@@ -4250,4 +4248,3 @@
         fetchFullAutoEqMasterIndex();
         requestAnimationFrame(renderCanvasLoop);
       });
-    })();
