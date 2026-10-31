@@ -2626,47 +2626,13 @@
         return out;
       }
 
+      // Thin wrapper kept for the AutoEq "official ParametricEQ.txt" loader. The parsing and the
+      // apply step live in section 13b, shared with every other import format.
       function applyEqualizerApoTextToState(rawText, rationaleLabel = 'Imported from Equalizer APO') {
-        const lines = rawText.split(/\r?\n/);
-        const imported = [];
-        const pRx = /Preamp:\s*([+-]?\d+(?:\.\d+)?)\s*dB/i;
-        const fRx = /Filter\s*\d*:\s*(ON|OFF)\s+([A-Z]+)\s+Fc\s+(\d+(?:\.\d+)?)\s*Hz(?:\s+Gain\s+([+-]?\d+(?:\.\d+)?)\s*dB)?(?:\s+Q\s+(\d+(?:\.\d+)?))?/i;
-
-        lines.forEach((line, idx) => {
-          const pm = line.match(pRx);
-          if (pm) {
-            state.autoPreamp = false;
-            state.preampDb = parseFloat(pm[1]);
-          }
-          const fm = line.match(fRx);
-          if (fm) {
-            const code = fm[2].toUpperCase();
-            let ft = 'peaking';
-            if (code.startsWith('LS')) ft = 'lowshelf';
-            else if (code.startsWith('HS')) ft = 'highshelf';
-            else if (code.startsWith('LP')) ft = 'lowpass';
-            else if (code.startsWith('HP')) ft = 'highpass';
-
-            imported.push({
-              id: `imp_${idx}_${Date.now()}`,
-              enabled: fm[1].toUpperCase() === 'ON',
-              filterType: ft,
-              frequency: Math.max(20, Math.min(20000, Math.round(parseFloat(fm[3])))),
-              gain: fm[4] !== undefined ? parseFloat(fm[4]) : 0.0,
-              Q: fm[5] !== undefined ? parseFloat(fm[5]) : 0.71,
-              rationale: rationaleLabel
-            });
-          }
-        });
-
-        if (imported.length > 0) {
-          pushEqHistory();
-          state.bands = imported.slice(0, 10);
-          state.selectedBandId = state.bands[0].id;
-          syncWebAudioBiquadNodes();
-          renderBandsTable();
-        }
-        return imported.length;
+        const res = parseEqualizerApo(rawText, rationaleLabel);
+        if (!applyImportedPreset(res)) return 0;
+        if (res.warnings.length) renderImportReport(res, '');
+        return res.bands.length;
       }
 
       // ====================================================================
@@ -4079,14 +4045,12 @@
       });
 
       document.getElementById('btnApplyApoImport').addEventListener('click', () => {
+        // The pasted text is auto-detected: Equalizer APO, GraphicEQ, DSP JSON, Poweramp,
+        // Easy Effects or CamillaDSP YAML all work here.
         const raw = document.getElementById('apoImportTextarea').value;
-        const count = applyEqualizerApoTextToState(raw, 'Imported from Equalizer APO');
-        if (count > 0) {
+        if (importPresetText(raw, 'pasted text')) {
           document.getElementById('modalApo').classList.add('hidden');
           document.getElementById('modalApo').classList.remove('flex');
-          showToast(`Imported ${count} Equalizer APO bands`);
-        } else {
-          showToast('No valid Filter lines found in text');
         }
       });
 
@@ -4525,6 +4489,943 @@
         document.getElementById('btnExportWavelet').addEventListener('click', exportWaveletGraphicEq);
       }
 
+
+      // ====================================================================
+      // 13b. PRESET IMPORT
+      //   Exact parameters:  SonaDSP DSP JSON, Equalizer APO, Poweramp, Easy Effects, CamillaDSP YAML
+      //   Response curves:   Wavelet GraphicEQ, convolution WAV (re-fitted to parametric bands,
+      //                      so these are approximate and say so)
+      // The parsers below are pure (no DOM, no app state). Each returns
+      //   { format, label, bands, preampDb, warnings, curve? }
+      // preampDb is null when the file carries no preamp (the current preamp setting is kept).
+      // `curve` ({ db }) is set instead of `bands` for the response-curve formats.
+      // Nothing is dropped silently: every skipped, clamped or approximated item is a warning.
+      // ====================================================================
+      // @@import-pure-start
+      const IMPORT_MAX_BYTES = 64 * 1024 * 1024;
+      const IMPORT_PREAMP_MIN_DB = -15; // same range as the preamp slider
+      const IMPORT_PREAMP_MAX_DB = 12;
+      const IMPORT_WAV_MAX_FRAMES = 1 << 18;
+
+      function impClamp(v, lo, hi) {
+        return Math.max(lo, Math.min(hi, v));
+      }
+
+      function impNum(v) {
+        const n = typeof v === 'string' ? parseFloat(v) : v;
+        return typeof n === 'number' && Number.isFinite(n) ? n : NaN;
+      }
+
+      function impFmt(v) {
+        return String(Number(Number(v).toFixed(2)));
+      }
+
+      // Octave bandwidth -> Q (RBJ): Q = sqrt(2^BW) / (2^BW - 1).
+      function impBandwidthOctToQ(bw) {
+        const p = Math.pow(2, bw);
+        return Math.sqrt(p) / (p - 1);
+      }
+
+      // RBJ shelf slope S -> Q: Q = 1 / sqrt((A + 1/A) * (1/S - 1) + 2).
+      function impShelfSlopeToQ(S, gainDb) {
+        const A = Math.pow(10, gainDb / 40);
+        const inner = (A + 1 / A) * (1 / S - 1) + 2;
+        return inner > 0 ? 1 / Math.sqrt(inner) : NaN;
+      }
+
+      // Builds one band in the app's shape, clamped to the ranges the UI enforces. Every change is
+      // recorded in `warnings`. Returns null (with a warning) when there is no usable frequency.
+      function impBand(spec, where, warnings, rationale) {
+        const isPass = spec.filterType === 'lowpass' || spec.filterType === 'highpass';
+        const f = impNum(spec.frequency);
+        if (!Number.isFinite(f)) {
+          warnings.push(`${where}: no frequency, skipped.`);
+          return null;
+        }
+        let g = isPass ? 0 : impNum(spec.gain);
+        if (!Number.isFinite(g)) g = 0;
+        let q = impNum(spec.Q);
+        if (!Number.isFinite(q)) q = Math.SQRT1_2;
+
+        const fr = Math.round(f);
+        const f2 = impClamp(fr, 20, 20000);
+        if (f2 !== fr) warnings.push(`${where}: ${impFmt(f)} Hz is outside 20 Hz to 20 kHz, clamped to ${f2} Hz.`);
+        const g2 = impClamp(g, -BAND_GAIN_LIMIT_DB, BAND_GAIN_LIMIT_DB);
+        if (g2 !== g) warnings.push(`${where}: gain ${impFmt(g)} dB is beyond SonaDSP's ±${BAND_GAIN_LIMIT_DB} dB limit, clamped to ${impFmt(g2)} dB.`);
+        const q2 = impClamp(q, 0.1, 18);
+        if (q2 !== q) warnings.push(`${where}: Q ${impFmt(q)} is outside 0.1 to 18, clamped to ${impFmt(q2)}.`);
+
+        return {
+          enabled: spec.enabled !== false,
+          filterType: spec.filterType,
+          frequency: f2,
+          gain: Number(g2.toFixed(1)),
+          Q: Number(q2.toFixed(2)),
+          rationale
+        };
+      }
+
+      function impFinish(format, label, bands, preampDb, warnings, extra) {
+        let list = bands;
+        if (list.length > EQ_MAX_BANDS) {
+          warnings.push(`The file has ${list.length} filters. SonaDSP holds ${EQ_MAX_BANDS}, so only the first ${EQ_MAX_BANDS} were imported.`);
+          list = list.slice(0, EQ_MAX_BANDS);
+        }
+        let pre = Number.isFinite(preampDb) ? preampDb : null;
+        if (pre !== null) {
+          const c = impClamp(pre, IMPORT_PREAMP_MIN_DB, IMPORT_PREAMP_MAX_DB);
+          if (c !== pre) warnings.push(`Preamp ${impFmt(pre)} dB is outside SonaDSP's ${IMPORT_PREAMP_MIN_DB} to +${IMPORT_PREAMP_MAX_DB} dB range, clamped to ${impFmt(c)} dB.`);
+          pre = Number(c.toFixed(1));
+        }
+        return Object.assign({ format, label, bands: list, preampDb: pre, warnings }, extra || {});
+      }
+
+      // ---------------------------------------------------------------- SonaDSP DSP JSON
+      function parseSonaDspJson(data) {
+        const warnings = [];
+        const label = 'SonaDSP DSP JSON';
+        if (Number.isFinite(data.version) && data.version > 1) {
+          warnings.push(`This file is version ${data.version}; this SonaDSP reads version 1, so newer fields may be ignored.`);
+        }
+        if (!Array.isArray(data.bands)) throw new Error('SonaDSP JSON has no "bands" list.');
+        const types = ['peaking', 'lowshelf', 'highshelf', 'lowpass', 'highpass'];
+        const bands = [];
+        data.bands.forEach((b, i) => {
+          const where = `Band ${i + 1}`;
+          if (!b || typeof b !== 'object') { warnings.push(`${where}: not an object, skipped.`); return; }
+          if (!types.includes(b.type)) { warnings.push(`${where}: unknown type "${b.type}", skipped.`); return; }
+          const band = impBand({
+            filterType: b.type, enabled: b.enabled !== false,
+            frequency: b.frequencyHz, gain: b.gainDb, Q: b.q
+          }, where, warnings, 'Imported from SonaDSP DSP JSON');
+          if (band) bands.push(band);
+        });
+        return impFinish('sonadsp', label, bands, impNum(data.preampDb), warnings, {
+          meta: { model: typeof data.model === 'string' ? data.model : '', target: typeof data.target === 'string' ? data.target : '' }
+        });
+      }
+
+      // ---------------------------------------------------------------- Equalizer APO
+      function apoFilterType(code) {
+        if (code === 'PK' || code === 'PEQ') return 'peaking';
+        if (code === 'LS' || code === 'LSC' || code === 'LSQ') return 'lowshelf';
+        if (code === 'HS' || code === 'HSC' || code === 'HSQ') return 'highshelf';
+        if (code === 'LP' || code === 'LPQ') return 'lowpass';
+        if (code === 'HP' || code === 'HPQ') return 'highpass';
+        return null;
+      }
+
+      // "GraphicEQ: 20 -3.5; 21 -3.4; ..." -> sorted [[hz, db], ...]
+      function parseGraphicEqPairs(body) {
+        const pairs = [];
+        String(body).split(';').forEach((chunk) => {
+          const m = chunk.trim().match(/^([+-]?\d+(?:\.\d+)?)[\s,]+([+-]?\d+(?:\.\d+)?)$/);
+          if (m) {
+            const f = parseFloat(m[1]);
+            if (f > 0) pairs.push([f, parseFloat(m[2])]);
+          }
+        });
+        pairs.sort((a, b) => a[0] - b[0]);
+        return pairs;
+      }
+
+      function parseEqualizerApo(text, rationale) {
+        const note = rationale || 'Imported from Equalizer APO';
+        const warnings = [];
+        const bands = [];
+        let preamp = null;
+        let preampLines = 0;
+        let graphic = null;
+        const ignored = new Map(); // command name -> first line number
+        const noQ = [];
+
+        String(text).split(/\r?\n/).forEach((raw, i) => {
+          const n = i + 1;
+          const line = raw.replace(/#.*$/, '').trim();
+          if (!line) return;
+
+          let m = line.match(/^Preamp\s*:\s*([+-]?\d+(?:[.,]\d+)?)\s*dB/i);
+          if (m) {
+            preamp = (preamp || 0) + parseFloat(m[1].replace(',', '.'));
+            preampLines++;
+            return;
+          }
+
+          m = line.match(/^Filter\s*\d*\s*:\s*(ON|OFF)\b\s*(\S+)?(.*)$/i);
+          if (m) {
+            const code = (m[2] || '').toUpperCase();
+            const rest = m[3] || '';
+            const ft = apoFilterType(code);
+            if (!ft) {
+              warnings.push(`Line ${n}: filter type ${code || '(none)'} isn't supported (only peaking, shelves and low/high-pass), skipped.`);
+              return;
+            }
+            const fc = rest.match(/Fc\s+(\d+(?:\.\d+)?)\s*(k?)Hz/i);
+            const gn = rest.match(/Gain\s+([+-]?\d+(?:\.\d+)?)\s*dB/i);
+            const qm = rest.match(/\bQ\s+(\d+(?:\.\d+)?)/i);
+            const bwo = rest.match(/\bBW\s+Oct\s+(\d+(?:\.\d+)?)/i);
+            const bwh = rest.match(/\bBW\s+Hz\s+(\d+(?:\.\d+)?)/i);
+            if (!fc) { warnings.push(`Line ${n}: ${code} filter has no "Fc ... Hz", skipped.`); return; }
+            const freq = parseFloat(fc[1]) * (fc[2] ? 1000 : 1);
+
+            let Q = NaN;
+            if (qm) Q = parseFloat(qm[1]);
+            else if (bwo && parseFloat(bwo[1]) > 0) Q = impBandwidthOctToQ(parseFloat(bwo[1]));
+            else if (bwh && parseFloat(bwh[1]) > 0) Q = freq / parseFloat(bwh[1]);
+            else noQ.push(n);
+
+            const band = impBand({
+              filterType: ft, enabled: m[1].toUpperCase() === 'ON',
+              frequency: freq, gain: gn ? parseFloat(gn[1]) : 0, Q
+            }, `Line ${n} (${code})`, warnings, note);
+            if (band) bands.push(band);
+            return;
+          }
+
+          m = line.match(/^GraphicEQ\s*:\s*(.*)$/i);
+          if (m) {
+            const pairs = parseGraphicEqPairs(m[1]);
+            if (pairs.length >= 2) graphic = pairs;
+            else warnings.push(`Line ${n}: GraphicEQ line has no readable "frequency gain" pairs, skipped.`);
+            return;
+          }
+
+          m = line.match(/^([A-Za-z][A-Za-z ]*?)\s*:/);
+          const name = m ? m[1] : line.split(/\s+/)[0];
+          if (!ignored.has(name)) ignored.set(name, n);
+        });
+
+        if (preampLines > 1) warnings.push(`The file has ${preampLines} Preamp lines. Their gains were added together.`);
+        if (noQ.length) {
+          warnings.push(`No Q given on line${noQ.length > 1 ? 's' : ''} ${noQ.join(', ')}: used Q 0.71.`);
+        }
+        if (ignored.size) {
+          const names = [...ignored.entries()].map(([k, v]) => `${k} (line ${v})`).join(', ');
+          warnings.push(`Ignored unsupported Equalizer APO command${ignored.size > 1 ? 's' : ''}: ${names}.`);
+          if (ignored.has('Channel') || ignored.has('Device')) {
+            warnings.push('Channel/Device rules were ignored, so every filter is applied to both channels.');
+          }
+          if ([...ignored.keys()].some((k) => /^convolution$/i.test(k))) {
+            warnings.push('A Convolution command was found. Import that .wav file directly instead.');
+          }
+        }
+        if (bands.length && graphic) {
+          warnings.push('The file has both parametric filters and a GraphicEQ line. Only the parametric filters were imported.');
+          graphic = null;
+        }
+        const res = impFinish('apo', 'Equalizer APO', bands, preamp === null ? NaN : preamp, warnings);
+        res.graphic = graphic;
+        res.graphicPreampDb = preamp === null ? 0 : preamp;
+        return res;
+      }
+
+      // ---------------------------------------------------------------- Poweramp
+      function parsePoweramp(data) {
+        const warnings = [];
+        const label = 'Poweramp';
+        let presets = null;
+        if (Array.isArray(data)) presets = data;
+        else if (data && Array.isArray(data.preset)) presets = data.preset;
+        else if (data && Array.isArray(data.bands)) presets = [data];
+        if (!presets || presets.length === 0) throw new Error('No Poweramp preset found in this file.');
+
+        const p = presets.find((x) => x && x.parametric !== false && Array.isArray(x.bands));
+        if (!p) throw new Error('This Poweramp file has no parametric preset (graphic-EQ presets are not supported).');
+        if (presets.length > 1) {
+          warnings.push(`The file holds ${presets.length} presets. Imported "${p.name || 'unnamed'}", the first parametric one.`);
+        }
+
+        const types = { 3: 'peaking', 4: 'lowshelf', 5: 'highshelf' };
+        const bands = [];
+        p.bands.forEach((b, i) => {
+          const where = `Band ${i + 1}`;
+          const ft = types[b && b.type];
+          if (!ft) { warnings.push(`${where}: Poweramp band type ${b && b.type} isn't supported, skipped.`); return; }
+          if (b.channels !== undefined && b.channels !== 0) {
+            warnings.push(`${where}: applies to one channel only. SonaDSP bands are stereo-linked, so it was skipped.`);
+            return;
+          }
+          const band = impBand({ filterType: ft, enabled: true, frequency: b.frequency, gain: b.gain, Q: b.q }, where, warnings, 'Imported from Poweramp');
+          if (band) bands.push(band);
+        });
+        return impFinish('poweramp', label, bands, impNum(p.preamp), warnings, { meta: { model: typeof p.name === 'string' ? p.name : '', target: '' } });
+      }
+
+      // ---------------------------------------------------------------- Easy Effects
+      const EASY_EFFECTS_IMPORT_TYPES = { Bell: 'peaking', 'Lo-shelf': 'lowshelf', 'Hi-shelf': 'highshelf', 'Lo-pass': 'lowpass', 'Hi-pass': 'highpass' };
+
+      function findEasyEffectsEq(data) {
+        if (!data || typeof data !== 'object') return null;
+        for (const side of ['output', 'input']) {
+          const sec = data[side];
+          if (sec && typeof sec === 'object') {
+            const key = Object.keys(sec).find((k) => /^equalizer/i.test(k));
+            if (key && sec[key] && typeof sec[key] === 'object') return { eq: sec[key], side, key, all: Object.keys(sec).filter((k) => /^equalizer/i.test(k)) };
+          }
+        }
+        const key = Object.keys(data).find((k) => /^equalizer/i.test(k));
+        if (key && data[key] && typeof data[key] === 'object') return { eq: data[key], side: '', key, all: [key] };
+        return null;
+      }
+
+      function parseEasyEffects(data) {
+        const warnings = [];
+        const found = findEasyEffectsEq(data);
+        if (!found) throw new Error('No equalizer found in this Easy Effects preset.');
+        const eq = found.eq;
+        if (found.all.length > 1) warnings.push(`The preset has ${found.all.length} equalizers. Imported ${found.key}.`);
+        if (eq.mode && eq.mode !== 'IIR') {
+          warnings.push(`The equalizer is in ${eq.mode} mode. Its bands were imported as ordinary biquad filters, so the phase behaviour differs.`);
+        }
+        let side = eq.left;
+        if (!side || typeof side !== 'object') side = eq.right;
+        if (!side || typeof side !== 'object') throw new Error('The Easy Effects equalizer has no band data.');
+        if (eq['split-channels'] && eq.left && eq.right && JSON.stringify(eq.left) !== JSON.stringify(eq.right)) {
+          warnings.push('Left and right channels use different bands. Only the left channel was imported.');
+        }
+
+        const keys = Object.keys(side).filter((k) => /^band\d+$/.test(k)).sort((a, b) => parseInt(a.slice(4), 10) - parseInt(b.slice(4), 10));
+        const count = Number.isFinite(eq['num-bands']) ? Math.min(eq['num-bands'], keys.length) : keys.length;
+        const bands = [];
+        const modes = new Set();
+        let higherOrder = false;
+        keys.slice(0, count).forEach((k, i) => {
+          const b = side[k];
+          const where = `Band ${i + 1}`;
+          if (!b || typeof b !== 'object') return;
+          if (b.type === 'Off') return;
+          const ft = EASY_EFFECTS_IMPORT_TYPES[b.type];
+          if (!ft) { warnings.push(`${where}: filter type "${b.type}" isn't supported, skipped.`); return; }
+          if (b.mode && b.mode !== 'APO (DR)') modes.add(b.mode);
+          if (b.slope && b.slope !== 'x1' && ft !== 'peaking') higherOrder = true;
+          const band = impBand({ filterType: ft, enabled: !b.mute, frequency: b.frequency, gain: b.gain, Q: b.q }, where, warnings, 'Imported from Easy Effects');
+          if (band) bands.push(band);
+        });
+        if (modes.size) warnings.push(`Bands use ${[...modes].join(', ')} mode. Frequency, gain and Q were taken as-is, so the curve can differ slightly from Easy Effects.`);
+        if (higherOrder) warnings.push('Some filters use a steeper slope (x2 to x4). They were imported as a single biquad.');
+
+        const input = impNum(eq['input-gain']);
+        const output = impNum(eq['output-gain']);
+        const pre = (Number.isFinite(input) ? input : 0) + (Number.isFinite(output) ? output : 0);
+        const hasGain = Number.isFinite(input) || Number.isFinite(output);
+        return impFinish('easyeffects', 'Easy Effects', bands, hasGain ? pre : NaN, warnings);
+      }
+
+      // ---------------------------------------------------------------- YAML subset (for CamillaDSP)
+      // Handles what CamillaDSP configs use: block maps and lists (including lists at the same indent
+      // as their key), inline [a, b] and {k: v}, quoted strings, numbers, booleans and comments.
+      // Anchors, tags and multi-line scalars are rejected with a clear error instead of misread.
+      function yamlStripComment(s) {
+        let q = null;
+        for (let i = 0; i < s.length; i++) {
+          const c = s[i];
+          if (q) { if (c === q) q = null; continue; }
+          if (c === '"' || c === "'") { q = c; continue; }
+          if (c === '#' && (i === 0 || /\s/.test(s[i - 1]))) return s.slice(0, i);
+        }
+        return s;
+      }
+
+      function yamlScalar(t) {
+        const s = t.trim();
+        if (s === '') return null;
+        if ((s[0] === '"' && s[s.length - 1] === '"' && s.length >= 2)) {
+          return s.slice(1, -1).replace(/\\(["\\nt])/g, (_, c) => (c === 'n' ? '\n' : c === 't' ? '\t' : c));
+        }
+        if ((s[0] === "'" && s[s.length - 1] === "'" && s.length >= 2)) return s.slice(1, -1).replace(/''/g, "'");
+        if (/^(true|True|TRUE)$/.test(s)) return true;
+        if (/^(false|False|FALSE)$/.test(s)) return false;
+        if (/^(null|Null|NULL|~)$/.test(s)) return null;
+        if (/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(s)) return Number(s);
+        return s;
+      }
+
+      // Splits "a, b, [c, d]" on top-level commas.
+      function yamlSplitFlat(s) {
+        const out = [];
+        let depth = 0, q = null, cur = '';
+        for (const c of s) {
+          if (q) { cur += c; if (c === q) q = null; continue; }
+          if (c === '"' || c === "'") { q = c; cur += c; continue; }
+          if (c === '[' || c === '{') depth++;
+          if (c === ']' || c === '}') depth--;
+          if (c === ',' && depth === 0) { out.push(cur); cur = ''; continue; }
+          cur += c;
+        }
+        if (cur.trim() !== '') out.push(cur);
+        return out;
+      }
+
+      // Index of the ':' that separates key from value (followed by space or end), outside quotes.
+      function yamlKeyColon(s) {
+        let q = null;
+        for (let i = 0; i < s.length; i++) {
+          const c = s[i];
+          if (q) { if (c === q) q = null; continue; }
+          if (c === '"' || c === "'") { if (i === 0) q = c; continue; }
+          if (c === ':' && (i === s.length - 1 || /\s/.test(s[i + 1]))) return i;
+        }
+        return -1;
+      }
+
+      function yamlInline(t) {
+        const s = t.trim();
+        if (s[0] === '[' && s[s.length - 1] === ']') return yamlSplitFlat(s.slice(1, -1)).map(yamlInline);
+        if (s[0] === '{' && s[s.length - 1] === '}') {
+          const obj = {};
+          yamlSplitFlat(s.slice(1, -1)).forEach((part) => {
+            const k = yamlKeyColon(part.trim());
+            if (k < 0) throw new Error(`Unreadable inline map entry "${part.trim()}".`);
+            obj[String(yamlScalar(part.trim().slice(0, k)))] = yamlInline(part.trim().slice(k + 1));
+          });
+          return obj;
+        }
+        if (/^[&*!|>]/.test(s)) throw new Error(`YAML feature not supported: "${s.slice(0, 20)}".`);
+        return yamlScalar(s);
+      }
+
+      function parseYamlSubset(text) {
+        const lines = [];
+        String(text).split(/\r?\n/).forEach((raw, i) => {
+          if (/^\s*(---|\.\.\.)\s*$/.test(raw)) return;
+          const noComment = yamlStripComment(raw);
+          if (noComment.trim() === '') return;
+          if (/^\s*\t/.test(noComment)) throw new Error(`Line ${i + 1}: tabs can't be used for YAML indentation.`);
+          const indent = noComment.length - noComment.trimStart().length;
+          lines.push({ indent, text: noComment.trim(), no: i + 1 });
+        });
+
+        const isSeqItem = (l) => l.text === '-' || l.text.startsWith('- ');
+
+        function parseBlock(i, indent) {
+          return isSeqItem(lines[i]) ? parseSeq(i, indent) : parseMap(i, indent);
+        }
+
+        function parseSeq(i, indent) {
+          const arr = [];
+          while (i < lines.length && lines[i].indent === indent && isSeqItem(lines[i])) {
+            const rest = lines[i].text.slice(1).trim();
+            if (rest === '') {
+              if (i + 1 < lines.length && lines[i + 1].indent > indent) {
+                const r = parseBlock(i + 1, lines[i + 1].indent);
+                arr.push(r.value); i = r.next;
+              } else { arr.push(null); i++; }
+            } else if (yamlKeyColon(rest) >= 0 && !/^[\[{"']/.test(rest)) {
+              // "- key: value" starts a map whose later keys line up with this first key.
+              const offset = lines[i].text.length - lines[i].text.slice(1).trimStart().length;
+              lines[i] = { indent: indent + offset, text: rest, no: lines[i].no };
+              const r = parseMap(i, indent + offset);
+              arr.push(r.value); i = r.next;
+            } else {
+              arr.push(yamlInline(rest)); i++;
+            }
+          }
+          return { value: arr, next: i };
+        }
+
+        function parseMap(i, indent) {
+          const obj = {};
+          while (i < lines.length && lines[i].indent === indent && !isSeqItem(lines[i])) {
+            const l = lines[i];
+            const k = yamlKeyColon(l.text);
+            if (k < 0) throw new Error(`Line ${l.no}: expected "key: value".`);
+            const key = String(yamlScalar(l.text.slice(0, k)));
+            const valText = l.text.slice(k + 1).trim();
+            if (valText === '') {
+              const nx = lines[i + 1];
+              if (nx && nx.indent > indent) {
+                const r = parseBlock(i + 1, nx.indent);
+                obj[key] = r.value; i = r.next;
+              } else if (nx && nx.indent === indent && isSeqItem(nx)) {
+                const r = parseSeq(i + 1, indent);
+                obj[key] = r.value; i = r.next;
+              } else { obj[key] = null; i++; }
+            } else {
+              try { obj[key] = yamlInline(valText); } catch (e) { throw new Error(`Line ${l.no}: ${e.message}`); }
+              i++;
+            }
+          }
+          return { value: obj, next: i };
+        }
+
+        if (lines.length === 0) return null;
+        const r = parseBlock(0, lines[0].indent);
+        if (r.next < lines.length) throw new Error(`Line ${lines[r.next].no}: unexpected indentation.`);
+        return r.value;
+      }
+
+      // ---------------------------------------------------------------- CamillaDSP
+      function parseCamillaYaml(text) {
+        const warnings = [];
+        const label = 'CamillaDSP';
+        let doc;
+        try { doc = parseYamlSubset(text); } catch (e) { throw new Error(`CamillaDSP YAML could not be read: ${e.message}`); }
+        if (!doc || typeof doc !== 'object' || !doc.filters || typeof doc.filters !== 'object') {
+          throw new Error('No "filters" section found in this CamillaDSP config.');
+        }
+        const filters = doc.filters;
+        const pipeline = Array.isArray(doc.pipeline) ? doc.pipeline : [];
+
+        // Work out which filter names are applied, in order, to the first channel that has any.
+        let chain = null;
+        if (pipeline.length) {
+          const perChannel = new Map();
+          let mixerSeen = false, processorSeen = false;
+          pipeline.forEach((step) => {
+            if (!step || typeof step !== 'object') return;
+            if (step.type === 'Mixer') { mixerSeen = true; return; }
+            if (step.type === 'Processor') { processorSeen = true; return; }
+            if (step.type !== 'Filter' || step.bypassed === true) return;
+            const chans = Array.isArray(step.channels) ? step.channels : (Number.isFinite(step.channel) ? [step.channel] : [0]);
+            const names = Array.isArray(step.names) ? step.names : [];
+            chans.forEach((c) => {
+              if (!perChannel.has(c)) perChannel.set(c, []);
+              perChannel.get(c).push(...names);
+            });
+          });
+          if (mixerSeen) warnings.push('Mixer steps were ignored. Filters are treated as applying to both channels.');
+          if (processorSeen) warnings.push('Processor steps (compressors etc.) were ignored.');
+          const channels = [...perChannel.keys()].sort((a, b) => a - b);
+          if (channels.length) {
+            chain = perChannel.get(channels[0]);
+            const differs = channels.some((c) => JSON.stringify(perChannel.get(c)) !== JSON.stringify(chain));
+            if (differs) warnings.push(`Channels use different filters. Only channel ${channels[0]} was imported.`);
+          }
+        }
+        if (!chain) {
+          chain = Object.keys(filters);
+          warnings.push(pipeline.length
+            ? 'No filter steps found in the pipeline. All filters in the "filters" section were imported.'
+            : 'The config has no pipeline. All filters in the "filters" section were imported.');
+        }
+
+        const bands = [];
+        let preamp = 0;
+        let sawGain = false;
+        const notEq = new Set();
+        const firstOrder = [];
+        let bwConverted = 0, slopeConverted = 0;
+
+        chain.forEach((name) => {
+          const f = filters[name];
+          const where = `Filter "${name}"`;
+          if (!f || typeof f !== 'object') { warnings.push(`${where}: used in the pipeline but not defined, skipped.`); return; }
+          const prm = f.parameters && typeof f.parameters === 'object' ? f.parameters : {};
+
+          if (f.type === 'Gain') {
+            let g = impNum(prm.gain);
+            if (!Number.isFinite(g)) g = 0;
+            if (prm.scale === 'linear') g = 20 * Math.log10(Math.abs(g) || 1e-6);
+            if (prm.mute === true) { warnings.push(`${where}: muted gain stage was ignored.`); return; }
+            if (prm.inverted === true) warnings.push(`${where}: polarity inversion was ignored.`);
+            preamp += g; sawGain = true;
+            return;
+          }
+          if (f.type !== 'Biquad') { notEq.add(`${name} (${f.type})`); return; }
+
+          const bt = prm.type;
+          const freq = prm.freq;
+          let ft = null, Q = NaN, gain = 0, fo = false;
+          if (bt === 'Peaking') {
+            ft = 'peaking'; gain = prm.gain;
+            if (Number.isFinite(impNum(prm.q))) Q = impNum(prm.q);
+            else if (Number.isFinite(impNum(prm.bandwidth)) && prm.bandwidth > 0) { Q = impBandwidthOctToQ(prm.bandwidth); bwConverted++; }
+          } else if (bt === 'Lowshelf' || bt === 'Highshelf') {
+            ft = bt === 'Lowshelf' ? 'lowshelf' : 'highshelf'; gain = prm.gain;
+            if (Number.isFinite(impNum(prm.q))) Q = impNum(prm.q);
+            else if (Number.isFinite(impNum(prm.slope)) && prm.slope > 0) {
+              Q = impShelfSlopeToQ(Math.min(prm.slope / 12, 1), impNum(gain) || 0); slopeConverted++;
+            }
+          } else if (bt === 'Lowpass' || bt === 'Highpass') {
+            ft = bt === 'Lowpass' ? 'lowpass' : 'highpass';
+            if (Number.isFinite(impNum(prm.q))) Q = impNum(prm.q);
+          } else if (bt === 'LowshelfFO' || bt === 'HighshelfFO') {
+            ft = bt === 'LowshelfFO' ? 'lowshelf' : 'highshelf'; gain = prm.gain; fo = true;
+          } else if (bt === 'LowpassFO' || bt === 'HighpassFO') {
+            ft = bt === 'LowpassFO' ? 'lowpass' : 'highpass'; fo = true;
+          } else {
+            warnings.push(`${where}: Biquad type ${bt} isn't supported, skipped.`);
+            return;
+          }
+          if (fo) firstOrder.push(name);
+          const band = impBand({ filterType: ft, enabled: true, frequency: freq, gain, Q }, where, warnings, 'Imported from CamillaDSP');
+          if (band) bands.push(band);
+        });
+
+        if (firstOrder.length) warnings.push(`First-order filter${firstOrder.length > 1 ? 's' : ''} (${firstOrder.join(', ')}) imported as second-order with Q 0.71. The slope is steeper than the original.`);
+        if (bwConverted) warnings.push(`${bwConverted} peaking filter${bwConverted > 1 ? 's' : ''} given as bandwidth in octaves, converted to Q.`);
+        if (slopeConverted) warnings.push(`${slopeConverted} shelf filter${slopeConverted > 1 ? 's' : ''} given as slope, converted to an equivalent Q (approximate).`);
+        if (notEq.size) warnings.push(`Not EQ filters, so not imported: ${[...notEq].join(', ')}.`);
+        return impFinish('camilla', label, bands, sawGain ? preamp : NaN, warnings);
+      }
+
+      // ---------------------------------------------------------------- response curves
+      // Linear interpolation of dB against log frequency, held flat beyond the ends.
+      function interpolateCurveToGrid(pairs, gridFreqs) {
+        const out = new Float64Array(gridFreqs.length);
+        const n = pairs.length;
+        let j = 0;
+        for (let i = 0; i < gridFreqs.length; i++) {
+          const f = gridFreqs[i];
+          if (f <= pairs[0][0]) { out[i] = pairs[0][1]; continue; }
+          if (f >= pairs[n - 1][0]) { out[i] = pairs[n - 1][1]; continue; }
+          while (j < n - 2 && pairs[j + 1][0] < f) j++;
+          const [f0, d0] = pairs[j], [f1, d1] = pairs[j + 1];
+          const t = (Math.log(f) - Math.log(f0)) / (Math.log(f1) - Math.log(f0));
+          out[i] = d0 + (d1 - d0) * t;
+        }
+        return out;
+      }
+
+      function graphicEqResult(pairs, preampDb, gridFreqs, warnings) {
+        const db = interpolateCurveToGrid(pairs, gridFreqs);
+        if (preampDb) for (let i = 0; i < db.length; i++) db[i] += preampDb;
+        warnings.push(`GraphicEQ gives a frequency response, not filters (${pairs.length} points).`);
+        return { format: 'graphiceq', label: 'GraphicEQ (Wavelet / Equalizer APO)', bands: [], preampDb: null, warnings, curve: { db } };
+      }
+
+      function impAscii(u8, from, to) {
+        let s = '';
+        for (let i = from; i < to && i < u8.length; i++) s += String.fromCharCode(u8[i]);
+        return s;
+      }
+
+      function fftInPlace(re, im) {
+        const n = re.length;
+        for (let i = 1, j = 0; i < n; i++) {
+          let bit = n >> 1;
+          for (; j & bit; bit >>= 1) j ^= bit;
+          j ^= bit;
+          if (i < j) {
+            const tr = re[i]; re[i] = re[j]; re[j] = tr;
+            const ti = im[i]; im[i] = im[j]; im[j] = ti;
+          }
+        }
+        for (let len = 2; len <= n; len <<= 1) {
+          const half = len >> 1;
+          const ang = (-2 * Math.PI) / len;
+          const wr = Math.cos(ang), wi = Math.sin(ang);
+          for (let i = 0; i < n; i += len) {
+            let cr = 1, ci = 0;
+            for (let k = 0; k < half; k++) {
+              const a = i + k, b = a + half;
+              const vr = re[b] * cr - im[b] * ci;
+              const vi = re[b] * ci + im[b] * cr;
+              re[b] = re[a] - vr; im[b] = im[a] - vi;
+              re[a] += vr; im[a] += vi;
+              const nr = cr * wr - ci * wi;
+              ci = cr * wi + ci * wr;
+              cr = nr;
+            }
+          }
+        }
+      }
+
+      // Magnitude (dB) of an impulse response at the given frequencies. Power is averaged over a
+      // 1/6-octave window so a noisy tail or dense high-frequency bins don't jitter the curve.
+      function irMagnitudeDb(samples, sr, gridFreqs) {
+        let size = 32768;
+        while (size < samples.length * 2 && size < (1 << 19)) size <<= 1;
+        const re = new Float64Array(size);
+        const im = new Float64Array(size);
+        re.set(samples.subarray(0, Math.min(samples.length, size)));
+        fftInPlace(re, im);
+        const half = size >> 1;
+        const power = new Float64Array(half + 1);
+        for (let k = 0; k <= half; k++) power[k] = re[k] * re[k] + im[k] * im[k];
+
+        const out = new Float64Array(gridFreqs.length);
+        const nyq = sr / 2;
+        const edge = Math.pow(2, 1 / 12);
+        for (let i = 0; i < gridFreqs.length; i++) {
+          const f = Math.min(gridFreqs[i], nyq * 0.999);
+          const pos = (f * size) / sr;
+          const lo = Math.ceil(pos / edge), hi = Math.min(half, Math.floor(pos * edge));
+          let p;
+          if (hi - lo >= 1) {
+            let s = 0;
+            for (let k = lo; k <= hi; k++) s += power[k];
+            p = s / (hi - lo + 1);
+          } else {
+            const k0 = Math.min(half - 1, Math.floor(pos));
+            const t = pos - k0;
+            p = power[k0] * (1 - t) + power[k0 + 1] * t;
+          }
+          out[i] = 10 * Math.log10(Math.max(1e-14, p));
+        }
+        return out;
+      }
+
+      function parseConvolutionWav(buf, gridFreqs) {
+        const warnings = [];
+        const dv = new DataView(buf);
+        const u8 = new Uint8Array(buf);
+        let p = 12, fmt = null, dataOff = -1, dataLen = 0;
+        while (p + 8 <= dv.byteLength) {
+          const id = impAscii(u8, p, p + 4);
+          const size = dv.getUint32(p + 4, true);
+          const body = p + 8;
+          if (id === 'fmt ' && body + 16 <= dv.byteLength) {
+            fmt = { tag: dv.getUint16(body, true), ch: dv.getUint16(body + 2, true), sr: dv.getUint32(body + 4, true), bits: dv.getUint16(body + 14, true) };
+            if (fmt.tag === 0xFFFE && size >= 26 && body + 26 <= dv.byteLength) fmt.tag = dv.getUint16(body + 24, true);
+          } else if (id === 'data') {
+            dataOff = body;
+            dataLen = Math.min(size, dv.byteLength - body);
+            break;
+          }
+          p = body + size + (size & 1);
+        }
+        if (!fmt || dataOff < 0) throw new Error('This WAV file is missing its format or data chunk.');
+        const { tag, ch, sr, bits } = fmt;
+        const supported = (tag === 1 && (bits === 8 || bits === 16 || bits === 24 || bits === 32)) || (tag === 3 && (bits === 32 || bits === 64));
+        if (!supported || ch < 1 || sr < 8000) throw new Error(`Unsupported WAV encoding (format ${tag}, ${bits}-bit, ${ch} ch, ${sr} Hz).`);
+
+        const bytes = bits / 8;
+        const frameBytes = bytes * ch;
+        const frames = Math.floor(dataLen / frameBytes);
+        if (frames < 16) throw new Error('This WAV file is too short to be an impulse response.');
+        const n = Math.min(frames, IMPORT_WAV_MAX_FRAMES);
+        if (frames > n) warnings.push(`The impulse response is ${(frames / sr).toFixed(1)} s long. Only the first ${(n / sr).toFixed(1)} s was analysed.`);
+        if (frames / sr > 2) warnings.push('An impulse response this long usually holds reverb or room correction rather than a simple EQ. The fit follows its overall magnitude only.');
+        if (ch > 1) warnings.push(`The file has ${ch} channels. Only channel 1 was analysed.`);
+
+        const samples = new Float64Array(n);
+        let peak = 0;
+        for (let i = 0; i < n; i++) {
+          const o = dataOff + i * frameBytes;
+          let v;
+          if (tag === 3) v = bits === 32 ? dv.getFloat32(o, true) : dv.getFloat64(o, true);
+          else if (bits === 8) v = (dv.getUint8(o) - 128) / 128;
+          else if (bits === 16) v = dv.getInt16(o, true) / 32768;
+          else if (bits === 24) v = (((dv.getUint8(o + 2) << 24) | (dv.getUint8(o + 1) << 16) | (dv.getUint8(o) << 8)) >> 8) / 8388608;
+          else v = dv.getInt32(o, true) / 2147483648;
+          samples[i] = v;
+          if (Math.abs(v) > peak) peak = Math.abs(v);
+        }
+        if (!(peak > 0)) throw new Error('The impulse response is silent.');
+
+        warnings.push('A convolution WAV holds a frequency response, not filters. Its magnitude was re-fitted to parametric bands. Phase is not kept.');
+        return {
+          format: 'ir', label: 'Convolution WAV', bands: [], preampDb: null, warnings,
+          curve: { db: irMagnitudeDb(samples, sr, gridFreqs) },
+          meta: { sampleRate: sr, frames }
+        };
+      }
+
+      // ---------------------------------------------------------------- detection / dispatch
+      function decodePresetText(buf) {
+        const u8 = new Uint8Array(buf);
+        let enc = 'utf-8', start = 0;
+        if (u8[0] === 0xEF && u8[1] === 0xBB && u8[2] === 0xBF) start = 3;
+        else if (u8[0] === 0xFF && u8[1] === 0xFE) { enc = 'utf-16le'; start = 2; }
+        else if (u8[0] === 0xFE && u8[1] === 0xFF) { enc = 'utf-16be'; start = 2; }
+        return new TextDecoder(enc).decode(u8.subarray(start));
+      }
+
+      function parseJsonPreset(data) {
+        if (data && !Array.isArray(data) && data.format === 'SonaDSP-parametric-eq') return parseSonaDspJson(data);
+        const looksPoweramp = Array.isArray(data)
+          ? data.some((x) => x && Array.isArray(x.bands))
+          : !!(data && (Array.isArray(data.preset) || (data.parametric !== undefined && Array.isArray(data.bands))));
+        if (looksPoweramp) return parsePoweramp(data);
+        if (findEasyEffectsEq(data)) return parseEasyEffects(data);
+        throw new Error('This JSON file is not a recognised preset (SonaDSP DSP JSON, Poweramp or Easy Effects).');
+      }
+
+      function parsePresetText(text, gridFreqs) {
+        const t = String(text).trim();
+        if (!t) throw new Error('There is nothing to import: the input is empty.');
+        if (t[0] === '{' || t[0] === '[') {
+          let data;
+          try { data = JSON.parse(t); } catch (e) { throw new Error(`The file looks like JSON but could not be parsed (${e.message}).`); }
+          return parseJsonPreset(data);
+        }
+        if (/^\s*(Filter\s*\d*\s*:\s*(ON|OFF)\b|Preamp\s*:|GraphicEQ\s*:)/im.test(t)) {
+          const r = parseEqualizerApo(t);
+          if (r.bands.length === 0 && r.graphic) return graphicEqResult(r.graphic, r.graphicPreampDb, gridFreqs, r.warnings);
+          if (r.bands.length === 0 && r.format === 'apo' && !r.warnings.length) throw new Error('No usable filters found in this file.');
+          return r;
+        }
+        if (/^\s*filters\s*:/m.test(t) && /^\s*(pipeline|devices)\s*:/m.test(t)) return parseCamillaYaml(t);
+        if (/^\s*[\d.]+\s*[,;\t ]\s*-?[\d.]+/m.test(t)) {
+          throw new Error('This looks like a frequency-response measurement, not an EQ preset. Use "Import Custom FR" to load it as a headphone/IEM curve.');
+        }
+        throw new Error('Unrecognised file. Supported: SonaDSP DSP JSON, Equalizer APO .txt, Poweramp .json, Easy Effects .json, CamillaDSP .yml, Wavelet GraphicEQ .txt and convolution .wav.');
+      }
+
+      // buf: ArrayBuffer. gridFreqs: the frequency grid response curves are resampled onto.
+      function parsePresetBuffer(buf, gridFreqs) {
+        if (buf.byteLength > IMPORT_MAX_BYTES) throw new Error('The file is too large to import.');
+        const u8 = new Uint8Array(buf);
+        const head = impAscii(u8, 0, 4);
+        if (head === 'RIFF' && impAscii(u8, 8, 12) === 'WAVE') return parseConvolutionWav(buf, gridFreqs);
+        if (head === 'fLaC' || head === 'OggS' || head === 'ID3\u0003' || head.slice(0, 3) === 'ID3') {
+          throw new Error('That is an audio file. Import expects an EQ preset or a convolution .wav.');
+        }
+        return parsePresetText(decodePresetText(buf), gridFreqs);
+      }
+      // @@import-pure-end
+
+      // ---------------------------------------------------------------- response curve -> bands
+      // Used for GraphicEQ and convolution WAV. The curve includes any preamp, so it is split here:
+      // the mean level over 200 Hz to 2 kHz becomes the preamp and the rest is fitted with bands.
+      function fitCurveResultToBands(res) {
+        const sr = currentSampleRate();
+        const total = res.curve.db;
+        let sum = 0, cnt = 0;
+        for (let i = 0; i < LOG_FREQS.length; i++) {
+          if (LOG_FREQS[i] >= 200 && LOG_FREQS[i] <= 2000) { sum += total[i]; cnt++; }
+        }
+        const mid = cnt ? sum / cnt : 0;
+        const pre = Number(impClamp(mid, IMPORT_PREAMP_MIN_DB, IMPORT_PREAMP_MAX_DB).toFixed(1));
+        const shape = Float64Array.from(total, (v) => v - pre);
+
+        const bands = fitParametricEq(shape, sr, EQ_MAX_BANDS);
+
+        // Report how close the fit is, over the range the solver can actually reach.
+        const fit = new Float64Array(LOG_FREQS.length);
+        bands.forEach((b) => {
+          const c = computeBandMagnitudeDb(b, LOG_FREQS, sr);
+          for (let i = 0; i < fit.length; i++) fit[i] += c[i];
+        });
+        const maxF = Math.min(MAX_FREQ, sr * 0.49);
+        let se = 0, n = 0, worst = 0;
+        for (let i = 0; i < LOG_FREQS.length; i++) {
+          if (LOG_FREQS[i] > maxF) continue;
+          const e = shape[i] - fit[i];
+          se += e * e; n++;
+          if (Math.abs(e) > worst) worst = Math.abs(e);
+        }
+        const rms = n ? Math.sqrt(se / n) : 0;
+        const out = {
+          format: res.format, label: res.label, bands: bands.map((b) => ({ ...b, rationale: `Fitted from ${res.label}` })),
+          preampDb: pre, warnings: res.warnings.slice(), meta: res.meta
+        };
+        out.warnings.push(`Approximate: fitted ${bands.length} band${bands.length === 1 ? '' : 's'} to the imported response (RMS error ${rms.toFixed(2)} dB, worst ${worst.toFixed(1)} dB). The original filter types and Q values can't be recovered.`);
+        if (Math.abs(mid - pre) > 0.05) out.warnings.push(`The response sits ${impFmt(mid)} dB off 0 dB in the midrange, more than the preamp can take, so the fit absorbs the rest.`);
+        return out;
+      }
+
+      // ---------------------------------------------------------------- apply to the app
+      function importPresetFromBuffer(buf) {
+        let res = parsePresetBuffer(buf, LOG_FREQS);
+        if (res.curve) res = fitCurveResultToBands(res);
+        return res;
+      }
+
+      function applyImportedPreset(res) {
+        if (!res.bands.length) return false;
+        const stamp = Date.now();
+        pushEqHistory();
+        state.bands = res.bands.map((b, i) => ({ ...b, id: `imp_${i + 1}_${stamp}` }));
+        state.selectedBandId = state.bands[0].id;
+        if (Number.isFinite(res.preampDb)) {
+          state.autoPreamp = false;
+          state.preampDb = res.preampDb;
+          const slider = document.getElementById('preampSlider');
+          const readout = document.getElementById('preampReadout');
+          const autoBtn = document.getElementById('btnAutoPreamp');
+          if (slider) slider.value = state.preampDb;
+          if (readout) readout.textContent = `${state.preampDb > 0 ? '+' : ''}${state.preampDb.toFixed(1)} dB`;
+          if (autoBtn) autoBtn.className = AUTO_PREAMP_OFF_CLASS;
+        }
+        syncWebAudioBiquadNodes();
+        renderBandsTable();
+        return true;
+      }
+
+      // Shows what was imported and every note about it. Text comes from the file, so it is escaped.
+      function renderImportReport(res, sourceName) {
+        const box = document.getElementById('importReport');
+        if (!box) return;
+        const head = res.bands.length
+          ? `Imported ${res.bands.length} band${res.bands.length === 1 ? '' : 's'} from ${res.label}${sourceName ? ` (${sourceName})` : ''}`
+            + (Number.isFinite(res.preampDb) ? `, preamp ${res.preampDb.toFixed(1)} dB` : '')
+          : `Nothing imported from ${sourceName || res.label}`;
+        const items = res.warnings.map((w) => `<li>${escapeHtml(w)}</li>`).join('');
+        box.innerHTML = `
+          <div class="flex items-start justify-between gap-2">
+            <span class="text-xs font-bold text-[#1E1D1A]">${escapeHtml(head)}</span>
+            <button type="button" id="btnDismissImportReport" class="text-xs text-[#5C5852] hover:text-[#1E1D1A] cursor-pointer" aria-label="Dismiss">✕</button>
+          </div>
+          ${items ? `<ul class="list-disc pl-5 mt-1 space-y-0.5 text-xs text-[#5C5852]">${items}</ul>` : ''}`;
+        box.classList.remove('hidden');
+        document.getElementById('btnDismissImportReport').addEventListener('click', () => box.classList.add('hidden'));
+      }
+
+      function reportImportFailure(message, sourceName) {
+        const box = document.getElementById('importReport');
+        showToast(message);
+        if (!box) return;
+        box.innerHTML = `
+          <div class="flex items-start justify-between gap-2">
+            <span class="text-xs font-bold text-[#C84B31]">Could not import${sourceName ? ` ${escapeHtml(sourceName)}` : ''}</span>
+            <button type="button" id="btnDismissImportReport" class="text-xs text-[#5C5852] hover:text-[#1E1D1A] cursor-pointer" aria-label="Dismiss">✕</button>
+          </div>
+          <p class="mt-1 text-xs text-[#5C5852]">${escapeHtml(message)}</p>`;
+        box.classList.remove('hidden');
+        document.getElementById('btnDismissImportReport').addEventListener('click', () => box.classList.add('hidden'));
+      }
+
+      // Returns true when bands were loaded. `source` is the file name (or "pasted text").
+      function importPresetBuffer(buf, source) {
+        let res;
+        try {
+          res = importPresetFromBuffer(buf);
+        } catch (err) {
+          reportImportFailure(err && err.message ? err.message : 'Import failed.', source);
+          return false;
+        }
+        if (!applyImportedPreset(res)) {
+          renderImportReport(res, source);
+          showToast('No usable filters found in that file');
+          return false;
+        }
+        renderImportReport(res, source);
+        const notes = res.warnings.length;
+        showToast(`Imported ${res.bands.length} band${res.bands.length === 1 ? '' : 's'} from ${res.label}${notes ? ` (${notes} note${notes > 1 ? 's' : ''}, see below the export buttons)` : ''}`);
+        return true;
+      }
+
+      function importPresetText(text, source) {
+        return importPresetBuffer(new TextEncoder().encode(text).buffer, source);
+      }
+
+      // Import row, built next to the export buttons like the advanced export panel, so no HTML change.
+      function injectImportUi() {
+        if (document.getElementById('presetImportPanel')) return;
+        const anchor = document.getElementById('advancedExportPanel')
+          || document.getElementById('btnDownloadPowerampInline')
+          || document.getElementById('btnDownloadApoInline');
+        if (!anchor) return;
+        const host = anchor.id === 'advancedExportPanel' ? anchor : anchor.parentElement;
+
+        const btn = 'px-3 py-1.5 rounded-lg text-xs font-bold bg-[#EFEAE1] hover:bg-[#DED8CC] text-[#1E1D1A] border border-[#DED8CC] transition cursor-pointer';
+        const panel = document.createElement('div');
+        panel.id = 'presetImportPanel';
+        panel.className = 'w-full mt-3 pt-3 border-t border-[#DED8CC] flex flex-wrap items-center gap-2';
+        panel.innerHTML = `
+          <span class="text-xs font-bold text-[#5C5852] mr-1">Import preset</span>
+          <button type="button" id="btnImportPresetFile" class="${btn}" title="Open a SonaDSP DSP JSON, Equalizer APO, Poweramp, Easy Effects, CamillaDSP, Wavelet GraphicEQ or convolution WAV file. The format is detected automatically.">Open file…</button>
+          <span class="text-xs text-[#5C5852]">DSP JSON, Equalizer APO, Poweramp, Easy Effects, CamillaDSP, GraphicEQ, convolution .wav</span>
+          <input type="file" id="presetImportInput" class="hidden" accept=".json,.txt,.yml,.yaml,.conf,.wav" />
+          <div id="importReport" class="hidden w-full rounded-lg bg-[#F4F0EA] border border-[#DED8CC] p-2.5"></div>
+        `;
+        host.insertAdjacentElement('afterend', panel);
+
+        const input = document.getElementById('presetImportInput');
+        document.getElementById('btnImportPresetFile').addEventListener('click', () => input.click());
+        input.addEventListener('change', async (e) => {
+          const file = e.target.files && e.target.files[0];
+          e.target.value = ''; // lets the same file be picked again
+          if (!file) return;
+          try {
+            importPresetBuffer(await file.arrayBuffer(), file.name);
+          } catch (err) {
+            reportImportFailure('Could not read that file.', file.name);
+          }
+        });
+      }
 
       // ====================================================================
       // 14. LOCALSTORAGE PERSISTENCE, NAMED PRESETS & URL HASH SHARING
@@ -5100,6 +6001,7 @@
       // Initial Boot
       window.addEventListener('load', () => {
         injectAdvancedExportUi();
+        injectImportUi();
         injectPresetsAndShareUi();
         labelApproximateIemProfiles();
         populateIemTargetOptions();
