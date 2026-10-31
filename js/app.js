@@ -1067,6 +1067,7 @@
         updateApoPreviewUi();
         updateActiveBandPillUi();
         renderTelemetryMatrix();
+        if (typeof scheduleSaveSession === 'function') scheduleSaveSession();
 
         if (!audioCtx || !preampGainNode || biquadNodePool.length === 0) return;
         const now = audioCtx.currentTime;
@@ -3470,11 +3471,591 @@
         document.getElementById('btnExportDspJson').addEventListener('click', exportDspJson);
       }
 
+
+      // ====================================================================
+      // 14. LOCALSTORAGE PERSISTENCE, NAMED PRESETS & URL HASH SHARING
+      // ====================================================================
+      const STORAGE_SESSION_KEY = 'sonadsp_session_v1';
+      const STORAGE_PRESETS_KEY = 'sonadsp_presets_v1';
+      let saveSessionTimer = null;
+      let suppressAutoSave = false;
+
+      const SHORT_TO_FILTER = {
+        PK: 'peaking',
+        LSQ: 'lowshelf',
+        HSQ: 'highshelf',
+        LP: 'lowpass',
+        HP: 'highpass'
+      };
+
+      const FILTER_TO_SHORT = {
+        peaking: 'PK',
+        lowshelf: 'LSQ',
+        highshelf: 'HSQ',
+        lowpass: 'LP',
+        highpass: 'HP'
+      };
+
+      // UTF-8 safe Base64URL encoder/decoder (forum-safe: only A-Z, a-z, 0-9, -, _)
+      function encodeBase64Url(str) {
+        const bytes = new TextEncoder().encode(str);
+        let bin = '';
+        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      }
+
+      function decodeBase64Url(b64url) {
+        const cleaned = b64url.trim().replace(/-/g, '+').replace(/_/g, '/');
+        const pad = cleaned.length % 4 === 0 ? '' : '='.repeat(4 - (cleaned.length % 4));
+        const bin = atob(cleaned + pad);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return new TextDecoder().decode(bytes);
+      }
+
+      // ---- Compact URL Hash Serializer / Deserializer ----
+      function packStateToHashPayload() {
+        const payload = {
+          v: 1,
+          i: state.selectedIemKey,
+          t: state.targetCurveKey,
+          tl: Number(state.targetTiltDbPerOct.toFixed(2)),
+          bs: Number(state.targetBassShelfDb.toFixed(2)),
+          nf: state.normFreqHz,
+          pa: Number(state.preampDb.toFixed(1)),
+          ap: state.autoPreamp ? 1 : 0,
+          eq: state.isEqActive ? 1 : 0,
+          b: state.bands.map((b) => [
+            b.enabled ? 1 : 0,
+            FILTER_TO_SHORT[b.filterType] || 'PK',
+            Math.round(b.frequency),
+            Number(b.gain.toFixed(1)),
+            Number(b.Q.toFixed(2)),
+            b.rationale || ''
+          ])
+        };
+
+        // Include AutoEq GitHub metadata so opening the link auto-fetches the FR curve
+        if (state.selectedIemKey === 'custom' && state.activeAutoEqEntry) {
+          const e = state.activeAutoEqEntry;
+          payload.ae = [e.name, e.relPath, e.source, e.rig];
+        } else if (state.selectedIemKey === 'custom' && state.customIemName) {
+          payload.cn = state.customIemName;
+        }
+
+        return encodeBase64Url(JSON.stringify(payload));
+      }
+
+      function unpackHashPayloadToState(encodedStr, pushHistory = false) {
+        try {
+          const data = JSON.parse(decodeBase64Url(encodedStr));
+          if (!data || typeof data !== 'object' || !Array.isArray(data.b)) return false;
+
+          if (pushHistory && state.bands.length > 0) pushEqHistory();
+          suppressAutoSave = true;
+
+          if (typeof data.t === 'string') state.targetCurveKey = data.t;
+          if (Number.isFinite(data.tl)) state.targetTiltDbPerOct = Math.max(-1.8, Math.min(1.0, Number(data.tl)));
+          if (Number.isFinite(data.bs)) state.targetBassShelfDb = Math.max(0, Math.min(12, Number(data.bs)));
+          if (data.nf === 500 || data.nf === 1000) state.normFreqHz = data.nf;
+          if (Number.isFinite(data.pa)) state.preampDb = Math.max(-15, Math.min(12, Number(data.pa)));
+          if (data.ap !== undefined) state.autoPreamp = Boolean(data.ap);
+          if (data.eq !== undefined) state.isEqActive = Boolean(data.eq);
+
+          state.bands = data.b.slice(0, EQ_MAX_BANDS).map((Tuple, idx) => {
+            const [en, shortType, freq, gain, q, rationale] = Tuple;
+            const filterType = SHORT_TO_FILTER[shortType] || 'peaking';
+            const isPass = filterType === 'lowpass' || filterType === 'highpass';
+            return {
+              id: `sh_${idx + 1}_${Date.now()}`,
+              enabled: Boolean(en),
+              filterType,
+              frequency: Math.round(Math.max(20, Math.min(20000, Number(freq) || 1000))),
+              gain: isPass ? 0 : Number(Math.max(-BAND_GAIN_LIMIT_DB, Math.min(BAND_GAIN_LIMIT_DB, Number(gain) || 0)).toFixed(1)),
+              Q: Number(clampQ(Number(q) || 1.0).toFixed(2)),
+              rationale: typeof rationale === 'string' && rationale ? rationale : 'Shared preset band'
+            };
+          });
+          state.selectedBandId = state.bands[0]?.id || 'b1';
+
+          // Restore IEM selection or trigger AutoEq GitHub fetch
+          if (data.i === 'custom' && Array.isArray(data.ae) && data.ae.length >= 2) {
+            const entry = {
+              name: data.ae[0],
+              relPath: data.ae[1],
+              source: data.ae[2] || 'AutoEq',
+              rig: data.ae[3] || 'in-ear'
+            };
+            state.activeAutoEqEntry = entry;
+            state.customIemName = `${entry.name} (${entry.source})`;
+            state.selectedIemKey = 'custom';
+            // Fetch FR curve asynchronously without overwriting the unpacked bands
+            loadModelFromAutoEqGitHub(entry, false, false);
+          } else if (typeof data.i === 'string' && BUILTIN_IEM_PROFILES[data.i]) {
+            state.selectedIemKey = data.i;
+            state.activeAutoEqEntry = null;
+          }
+          
+          syncAllUiControlsFromState();
+          suppressAutoSave = false;
+          saveSessionNow();
+          setSessionStatusBadge('Loaded from Share Link');
+          return true;
+        } catch (err) {
+          suppressAutoSave = false;
+          console.warn('SonaDSP: Could not parse URL share hash:', err);
+          return false;
+        }
+      }
+
+      function tryRestoreFromUrlHash(pushHistory = false) {
+        const hash = window.location.hash.replace(/^#/, '');
+        if (!hash) return false;
+        const params = new URLSearchParams(hash);
+        const packed = params.get('s') || (hash.startsWith('s=') ? hash.slice(2) : null);
+        if (!packed) return false;
+        return unpackHashPayloadToState(packed, pushHistory);
+      }
+
+      async function copyShareLinkToClipboard() {
+        const code = packStateToHashPayload();
+        const newHash = `#s=${code}`;
+        if (window.history && window.history.replaceState) {
+          window.history.replaceState(null, '', newHash);
+        } else {
+          window.location.hash = newHash;
+        }
+        const shareUrl = window.location.href;
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(shareUrl);
+          } else {
+            copyTextToClipboard(shareUrl);
+          }
+        } catch (_) {
+          copyTextToClipboard(shareUrl);
+        }
+        setSessionStatusBadge('Share Link Active');
+        showToast('Copied shareable preset link to clipboard!');
+      }
+
+      // ---- LocalStorage Session Persistence ----
+      function serializeCurveArray(floatArr) {
+        if (!floatArr || !floatArr.length) return null;
+        const out = new Array(floatArr.length);
+        for (let i = 0; i < floatArr.length; i++) {
+          out[i] = Number(floatArr[i].toFixed(2));
+        }
+        return out;
+      }
+
+      function buildSessionSnapshot() {
+        return {
+          v: 1,
+          ts: Date.now(),
+          selectedIemKey: state.selectedIemKey,
+          customIemName: state.customIemName,
+          customIemCurve: state.selectedIemKey === 'custom' ? serializeCurveArray(state.customIemCurve) : null,
+          activeAutoEqEntry: state.activeAutoEqEntry,
+          targetCurveKey: state.targetCurveKey,
+          targetCustomName: state.targetCustomName,
+          targetCustomCurve: state.targetCurveKey === 'iem:custom' ? serializeCurveArray(state.targetCustomCurve) : null,
+          targetTiltDbPerOct: state.targetTiltDbPerOct,
+          targetBassShelfDb: state.targetBassShelfDb,
+          normFreqHz: state.normFreqHz,
+          isEqActive: state.isEqActive,
+          preampDb: state.preampDb,
+          autoPreamp: state.autoPreamp,
+          selectedBandId: state.selectedBandId,
+          showLiveFft: state.showLiveFft,
+          fftGainOffsetDb: state.fftGainOffsetDb,
+          bands: state.bands,
+          aiPrompt: document.getElementById('aiPromptInput')?.value || '',
+          apiEndpoint: state.apiEndpoint,
+          modelId: state.modelId,
+          useFallback: state.useFallback
+        };
+      }
+
+      function saveSessionNow() {
+        if (suppressAutoSave) return;
+        try {
+          localStorage.setItem(STORAGE_SESSION_KEY, JSON.stringify(buildSessionSnapshot()));
+          setSessionStatusBadge('Saved locally');
+        } catch (err) {
+          console.warn('SonaDSP: Failed to save session to localStorage:', err);
+        }
+      }
+
+      function scheduleSaveSession() {
+        if (suppressAutoSave) return;
+        clearTimeout(saveSessionTimer);
+        saveSessionTimer = setTimeout(saveSessionNow, 150);
+      }
+
+      function applySnapshotToState(snap, pushHistory = false) {
+        if (!snap || typeof snap !== 'object') return false;
+        if (pushHistory && state.bands.length > 0) pushEqHistory();
+
+        suppressAutoSave = true;
+
+        if (typeof snap.selectedIemKey === 'string') state.selectedIemKey = snap.selectedIemKey;
+        if (typeof snap.customIemName === 'string') state.customIemName = snap.customIemName;
+        if (Array.isArray(snap.customIemCurve) && snap.customIemCurve.length === NUM_FREQ_POINTS) {
+          state.customIemCurve = new Float32Array(snap.customIemCurve);
+        }
+        state.activeAutoEqEntry = snap.activeAutoEqEntry || null;
+
+        if (typeof snap.targetCurveKey === 'string') state.targetCurveKey = snap.targetCurveKey;
+        if (typeof snap.targetCustomName === 'string') state.targetCustomName = snap.targetCustomName;
+        if (Array.isArray(snap.targetCustomCurve) && snap.targetCustomCurve.length === NUM_FREQ_POINTS) {
+          state.targetCustomCurve = new Float32Array(snap.targetCustomCurve);
+        }
+
+        if (Number.isFinite(snap.targetTiltDbPerOct)) state.targetTiltDbPerOct = snap.targetTiltDbPerOct;
+        if (Number.isFinite(snap.targetBassShelfDb)) state.targetBassShelfDb = snap.targetBassShelfDb;
+        if (snap.normFreqHz === 500 || snap.normFreqHz === 1000) state.normFreqHz = snap.normFreqHz;
+        if ( typeof snap.isEqActive === 'boolean') state.isEqActive = snap.isEqActive;
+        if (Number.isFinite(snap.preampDb)) state.preampDb = snap.preampDb;
+        if (typeof snap.autoPreamp === 'boolean') state.autoPreamp = snap.autoPreamp;
+        if (typeof snap.showLiveFft === 'boolean') state.showLiveFft = snap.showLiveFft;
+        if (Number.isFinite(snap.fftGainOffsetDb)) state.fftGainOffsetDb = snap.fftGainOffsetDb;
+
+        if (Array.isArray(snap.bands) && snap.bands.length > 0) {
+          state.bands = snap.bands.slice(0, EQ_MAX_BANDS).map((b, i) => ({
+            id: b.id || `b_${i + 1}_${Date.now()}`,
+            enabled: b.enabled !== false,
+            filterType: FILTER_TYPES.some((t) => t.value === b.filterType) ? b.filterType : 'peaking',
+            frequency: Math.round(Math.max(20, Math.min(20000, Number(b.frequency) || 1000))),
+            gain: Number(Math.max(-BAND_GAIN_LIMIT_DB, Math.min(BAND_GAIN_LIMIT_DB, Number(b.gain) || 0)).toFixed(1)),
+            Q: Number(clampQ(Number(b.Q) || 1.0).toFixed(2)),
+            rationale: b.rationale || ''
+          }));
+          state.selectedBandId = snap.selectedBandId && state.bands.some((b) => b.id === snap.selectedBandId)
+            ? snap.selectedBandId
+            : state.bands[0].id;
+        }
+
+        if (typeof snap.aiPrompt === 'string') {
+          const promptEl = document.getElementById('aiPromptInput');
+          if (promptEl) promptEl.value = snap.aiPrompt;
+        }
+        if (typeof snap.apiEndpoint === 'string' && snap.apiEndpoint) state.apiEndpoint = snap.apiEndpoint;
+        if (typeof snap.modelId === 'string' && snap.modelId) state.modelId = snap.modelId;
+        if (typeof snap.useFallback === 'boolean') state.useFallback = snap.useFallback;
+
+        suppressAutoSave = false;
+        syncAllUiControlsFromState();
+
+        // If custom AutoEq entry was saved without cached curve array, fetch it from GitHub
+        if (state.selectedIemKey === 'custom' && !state.customIemCurve && state.activeAutoEqEntry) {
+          loadModelFromAutoEqGitHub(state.activeAutoEqEntry, false, false);
+        }
+        return true;
+      }
+
+      function tryRestoreSessionFromLocalStorage() {
+        try {
+          const raw = localStorage.getItem(STORAGE_SESSION_KEY);
+          if (!raw) return false;
+          const snap = JSON.parse(raw);
+          const ok = applySnapshotToState(snap, false);
+          if (ok) setSessionStatusBadge('Restored session');
+          return ok;
+        } catch (err) {
+          console.warn('SonaDSP: Could not restore session from localStorage:', err);
+          return false;
+        }
+      }
+
+      // Synchronizes all DOM dropdowns, sliders, and badges after state is loaded
+      function syncAllUiControlsFromState() {
+        // 1. IEM Select & Title Badge
+        const iemSel = document.getElementById('iemSelect');
+        if (iemSel) {
+          if (state.selectedIemKey === 'custom') {
+            let customOpt = iemSel.querySelector('option[value="custom"]');
+            if (!customOpt) {
+              customOpt = document.createElement('option');
+              customOpt.value = 'custom';
+              iemSel.prepend(customOpt);
+            }
+            const prefix = state.activeAutoEqEntry ? 'AutoEq' : 'Imported';
+            customOpt.textContent = `${prefix}: ${state.customIemName || 'Custom IEM'}`;
+            iemSel.value = 'custom';
+            document.getElementById('activeIemTitleBadge').textContent = state.customIemName || 'Custom IEM';
+            document.getElementById('btnLoadOfficialAutoEqPeq')?.classList.toggle('hidden', !state.activeAutoEqEntry);
+          } else {
+            if (BUILTIN_IEM_PROFILES[state.selectedIemKey]) {
+              iemSel.value = state.selectedIemKey;
+            } else {
+              state.selectedIemKey = 'simgot_em6l';
+              iemSel.value = 'simgot_em6l';
+            }
+            const optText = iemSel.options[iemSel.selectedIndex]?.text || BUILTIN_IEM_PROFILES[state.selectedIemKey].name;
+            document.getElementById('activeIemTitleBadge').textContent = optText;
+            document.getElementById('btnLoadOfficialAutoEqPeq')?.classList.add('hidden');
+          }
+        }
+
+        // 2. Target Select & Modifiers
+        const targetSel = document.getElementById('targetSelect');
+        if (targetSel) {
+          if (state.targetCurveKey === 'iem:custom' && state.targetCustomCurve) {
+            let opt = targetSel.querySelector('option[value="iem:custom"]');
+            if (!opt) {
+              opt = document.createElement('option');
+              opt.value = 'iem:custom';
+              targetSel.prepend(opt);
+            }
+            opt.textContent = `AutoEq target: ${state.targetCustomName || 'Custom'}`;
+          }
+          targetSel.value = state.targetCurveKey;
+        }
+        syncTargetSlidersUi();
+
+        // 3. Normalization Frequency Pills
+        document.getElementById('btnNorm500').className = state.normFreqHz === 500 ? NORM_ACTIVE_CLASS : NORM_INACTIVE_CLASS;
+        document.getElementById('btnNorm1000').className = state.normFreqHz === 1000 ? NORM_ACTIVE_CLASS : NORM_INACTIVE_CLASS;
+
+        // 4. Preamp & Auto-Preamp
+        const preampSlider = document.getElementById('preampSlider');
+        const preampReadout = document.getElementById('preampReadout');
+        const btnAutoPre = document.getElementById('btnAutoPreamp');
+        if (preampSlider) preampSlider.value = state.preampDb;
+        if (preampReadout) preampReadout.textContent = `${state.preampDb > 0 ? '+' : ''}${state.preampDb.toFixed(1)} dB`;
+        if (btnAutoPre) btnAutoPre.className = state.autoPreamp ? AUTO_PREAMP_ON_CLASS : AUTO_PREAMP_OFF_CLASS;
+
+        // 5. A/B Bypass & Live FFT
+        updateAbButtonUi();
+        const chkFft = document.getElementById('chkShowFft');
+        const fftSlider = document.getElementById('fftGainSlider');
+        const fftReadout = document.getElementById('fftGainReadout');
+        if (chkFft) chkFft.checked = state.showLiveFft;
+        if (fftSlider) fftSlider.value = state.fftGainOffsetDb;
+        if (fftReadout) fftReadout.textContent = `+${state.fftGainOffsetDb}dB`;
+
+        // 6. AI Config Modal Fields
+        const cfgEnd = document.getElementById('cfgEndpoint');
+        const cfgMod = document.getElementById('cfgModel');
+        const cfgFall = document.getElementById('cfgFallback');
+        if (cfgEnd) cfgEnd.value = state.apiEndpoint;
+        if (cfgMod) cfgMod.value = state.modelId;
+        if (cfgFall) cfgFall.checked = state.useFallback;
+
+        // 7. Recompute curves, sync DSP nodes & re-render table
+        syncWebAudioBiquadNodes();
+        renderBandsTable();
+      }
+
+      // ---- Named User Presets in LocalStorage ----
+      function loadUserPresetsMap() {
+        try {
+          const raw = localStorage.getItem(STORAGE_PRESETS_KEY);
+          return raw ? JSON.parse(raw) : {};
+        } catch (_) {
+          return {};
+        }
+      }
+
+      function saveUserPresetsMap(map) {
+        try {
+          localStorage.setItem(STORAGE_PRESETS_KEY, JSON.stringify(map));
+        } catch (err) {
+          showToast('Storage quota exceeded while saving preset');
+        }
+      }
+
+      function defaultSuggestedPresetName() {
+        const iemName = state.selectedIemKey === 'custom'
+          ? (state.customIemName || 'Custom IEM')
+          : (BUILTIN_IEM_PROFILES[state.selectedIemKey]?.name.replace(/\s*\(approx\.\)\s*$/i, '') || 'IEM');
+        return `${iemName} — ${getTargetLabel()}`;
+      }
+
+      function renderPresetDropdownUi(selectedName = '') {
+        const sel = document.getElementById('userPresetSelect');
+        const delBtn = document.getElementById('btnDeleteUserPreset');
+        if (!sel) return;
+
+        const map = loadUserPresetsMap();
+        const names = Object.keys(map).sort((a, b) => (map[b].ts || 0) - (map[a].ts || 0));
+
+        sel.innerHTML = '';
+        const placeholder = document.createElement('option');
+        placeholder.value = '';
+        placeholder.textContent = names.length > 0 ? `Saved Presets (${names.length})...` : 'No saved presets yet';
+        sel.appendChild(placeholder);
+
+        names.forEach((name) => {
+          const opt = document.createElement('option');
+          opt.value = name;
+          opt.textContent = name;
+          if (name === selectedName) opt.selected = true;
+          sel.appendChild(opt);
+        });
+
+        if (delBtn) {
+          delBtn.disabled = !sel.value;
+          delBtn.classList.toggle('opacity-40', !sel.value);
+        }
+      }
+
+      function setSessionStatusBadge(text) {
+        const badge = document.getElementById('sessionStatusBadge');
+        if (badge) badge.textContent = text;
+      }
+
+      function injectPresetsAndShareUi() {
+        if (document.getElementById('sonaPresetToolbar')) return;
+
+        // 1. Add "Share Link" button to Top Studio Header (next to Export / Import APO)
+        const apoBtn = document.getElementById('btnOpenApoModal');
+        if (apoBtn && apoBtn.parentElement) {
+          const shareHeaderBtn = document.createElement('button');
+          shareHeaderBtn.id = 'btnCopyShareLinkHeader';
+          shareHeaderBtn.type = 'button';
+          shareHeaderBtn.title = 'Pack current EQ & IEM state into the URL hash and copy link';
+          shareHeaderBtn.className = 'flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#FBF9F5] hover:bg-[#EFEAE1] text-[#1E1D1A] border border-[#DED8CC] text-sm font-semibold transition cursor-pointer';
+          shareHeaderBtn.innerHTML = `
+            <svg class="w-4 h-4 text-[#2E644C]" fill="none" stroke="currentColor" stroke-width="2.1" viewBox="0 0 24 24">
+              <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            <span>Copy Share Link</span>
+          `;
+          shareHeaderBtn.addEventListener('click', copyShareLinkToClipboard);
+          apoBtn.insertAdjacentElement('beforebegin', shareHeaderBtn);
+        }
+
+        // 2. Inject Preset & Session Bar above the Parametric Equalizer Bands Table
+        const bandsContainer = document.getElementById('bandsTableContainer');
+        if (!bandsContainer) return;
+
+        const bar = document.createElement('div');
+        bar.id = 'sonaPresetToolbar';
+        bar.className = 'studio-well p-3 flex flex-wrap items-center justify-between gap-2.5';
+        bar.innerHTML = `
+          <div class="flex flex-wrap items-center gap-2 flex-1 min-w-[260px]">
+            <span class="text-xs font-bold uppercase tracking-wider text-[#5C5852] mr-1">Presets:</span>
+            <select id="userPresetSelect" class="bg-[#FBF9F5] border border-[#DED8CC] rounded-xl px-3 py-1.5 text-xs font-bold text-[#1E1D1A] focus:outline-none focus:border-[#C84B31] cursor-pointer max-w-[220px] truncate">
+            </select>
+            <input
+              id="userPresetNameInput"
+              type="text"
+              placeholder="Preset name (optional)..."
+              class="bg-[#FBF9F5] border border-[#DED8CC] rounded-xl px-3 py-1.5 text-xs font-semibold text-[#1E1D1A] placeholder-[#857F75] focus:outline-none focus:border-[#C84B31] w-44 sm:w-52"
+            />
+            <button id="btnSaveUserPreset" type="button" class="px-3 py-1.5 rounded-xl bg-[#2E644C] hover:bg-[#214B38] text-[#FBF9F5] text-xs font-bold transition cursor-pointer">
+              Save Preset
+            </button>
+            <button id="btnDeleteUserPreset" type="button" disabled class="px-2.5 py-1.5 rounded-xl bg-[#FBF9F5] hover:bg-[#EFEAE1] text-[#5C5852] hover:text-[#C84B31] border border-[#DED8CC] text-xs font-bold transition cursor-pointer opacity-40" title="Delete selected preset">
+              Delete
+            </button>
+          </div>
+
+          <div class="flex flex-wrap items-center gap-2">
+            <span id="sessionStatusBadge" class="font-mono-num text-[11px] font-semibold px-2.5 py-1 rounded-lg bg-[#FBF9F5] text-[#5C5852] border border-[#DED8CC]">
+              Auto-Save Ready
+            </span>
+            <button id="btnCopyShareLinkBar" type="button" class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#C84B31] hover:bg-[#AD3B23] text-[#FBF9F5] text-xs font-bold transition cursor-pointer shadow-2xs">
+              <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" stroke-width="2.2" viewBox="0 0 24 24">
+                <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" stroke-linecap="round" stroke-linejoin="round"/>
+                <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              <span>Copy Share Link</span>
+            </button>
+          </div>
+        `;
+
+        bandsContainer.insertAdjacentElement('beforebegin', bar);
+        renderPresetDropdownUi();
+
+        // Event Listeners for Preset Bar
+        const presetSel = document.getElementById('userPresetSelect');
+        const nameInput = document.getElementById('userPresetNameInput');
+
+        presetSel.addEventListener('change', () => {
+          const name = presetSel.value;
+          document.getElementById('btnDeleteUserPreset').disabled = !name;
+          document.getElementById('btnDeleteUserPreset').classList.toggle('opacity-40', !name);
+          if (!name) return;
+
+          const map = loadUserPresetsMap();
+          const preset = map[name];
+          if (preset && applySnapshotToState(preset, true)) {
+            nameInput.value = name;
+            saveSessionNow();
+            showToast(`Loaded preset: ${name}`);
+          }
+        });
+
+        document.getElementById('btnSaveUserPreset').addEventListener('click', () => {
+          const rawName = nameInput.value.trim() || defaultSuggestedPresetName();
+          const map = loadUserPresetsMap();
+          map[rawName] = buildSessionSnapshot();
+          saveUserPresetsMap(map);
+          nameInput.value = rawName;
+          renderPresetDropdownUi(rawName);
+          showToast(`Saved preset "${rawName}"`);
+        });
+
+        nameInput.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') {
+            e.preventDefault();
+            document.getElementById('btnSaveUserPreset').click();
+          }
+        });
+
+        document.getElementById('btnDeleteUserPreset').addEventListener('click', () => {
+          const name = presetSel.value;
+          if (!name) return;
+          const map = loadUserPresetsMap();
+          delete map[name];
+          saveUserPresetsMap(map);
+          if (nameInput.value.trim() === name) nameInput.value = '';
+          renderPresetDropdownUi('');
+          showToast(`Deleted preset "${name}"`);
+        });
+
+        document.getElementById('btnCopyShareLinkBar').addEventListener('click', copyShareLinkToClipboard);
+
+        // Save when AI prompt or FFT controls change
+        document.getElementById('aiPromptInput')?.addEventListener('input', scheduleSaveSession);
+        document.getElementById('chkShowFft')?.addEventListener('change', scheduleSaveSession);
+        document.getElementById('fftGainSlider')?.addEventListener('input', scheduleSaveSession);
+        document.getElementById('btnSaveAiConfig')?.addEventListener('click', scheduleSaveSession);
+
+        // Flush pending debounced save on tab close / refresh
+        window.addEventListener('beforeunload', () => {
+          if (saveSessionTimer) {
+            clearTimeout(saveSessionTimer);
+            saveSessionNow();
+          }
+        });
+
+        // Live-update if the user pastes a new #s=... share link into the URL bar
+        window.addEventListener('hashchange', () => {
+          if (tryRestoreFromUrlHash(true)) {
+            showToast('Loaded preset from URL hash');
+          }
+        });
+      }
+
+
       // Initial Boot
       window.addEventListener('load', () => {
         injectAdvancedExportUi();
+        injectPresetsAndShareUi();
         labelApproximateIemProfiles();
         populateIemTargetOptions();
+
+        // Priority 1: Shared URL hash (#s=...) | Priority 2: Previous localStorage session
+        const loadedFromHash = tryRestoreFromUrlHash(false);
+        if (!loadedFromHash) {
+          tryRestoreSessionFromLocalStorage();
+        }
+
         recomputeAcousticCurves();
         renderBandsTable();
         renderTelemetryMatrix();
