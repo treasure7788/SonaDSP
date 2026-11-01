@@ -419,6 +419,9 @@
       // ====================================================================
       // 4. ENTIRE AUTOEQ 6,000+ GITHUB LIBRARY INDEXER & FETCHER
       // ====================================================================
+      // Shown only when neither the live AutoEq index nor a cached copy is available. These
+      // paths are not guaranteed to match the current AutoEq folder layout: a 404 on one of
+      // them triggers a lookup by name in the live index (see resolveAutoEqEntryFromIndex).
       const CURATED_FALLBACK_CATALOG = [
         { name: 'Simgot EM6L', relPath: 'oratory1990/in-ear/Simgot%20EM6L', source: 'oratory1990', rig: 'in-ear' },
         { name: 'Simgot EA500 LM', relPath: 'crinacle/711%20in-ear/Simgot%20EA500%20LM', source: 'crinacle', rig: '711 in-ear' },
@@ -442,56 +445,176 @@
         { name: 'Sony IER-M9', relPath: 'crinacle/711%20in-ear/Sony%20IER-M9', source: 'crinacle', rig: '711 in-ear' }
       ];
 
-      async function fetchFullAutoEqMasterIndex() {
-        const badge = document.getElementById('autoEqIndexBadge');
-        state.autoEqCatalog = CURATED_FALLBACK_CATALOG.slice();
-        renderAutoEqSearchResults();
+      // Both mirrors serve the same files. raw.githubusercontent.com is tried first.
+      const AUTOEQ_RESULTS_BASES = [
+        'https://raw.githubusercontent.com/jaakkopasanen/AutoEq/master/results',
+        'https://cdn.jsdelivr.net/gh/jaakkopasanen/AutoEq@master/results'
+      ];
+      const AUTOEQ_INDEX_CACHE_KEY = 'sonadsp.autoeq.index.v1';
 
-        const indexUrls = [
-          'https://raw.githubusercontent.com/jaakkopasanen/AutoEq/master/results/INDEX.md',
-          'https://cdn.jsdelivr.net/gh/jaakkopasanen/AutoEq@master/results/INDEX.md'
-        ];
+      function safeDecodeURIComponent(s) {
+        try { return decodeURIComponent(s); } catch (_) { return s; }
+      }
 
-        for (const url of indexUrls) {
+      // Turns an AutoEq index path (or one from a share link, which is untrusted) into a
+      // percent-encoded path under results/. Returns null for anything that is not a plain
+      // relative path, so a crafted link cannot walk out of results/. Safe to apply twice.
+      function normalizeAutoEqRelPath(raw) {
+        if (typeof raw !== 'string') return null;
+        const segs = raw.trim().replace(/^\.?\//, '').split('/');
+        if (segs.length < 2) return null;
+        const out = [];
+        for (const seg of segs) {
+          const dec = safeDecodeURIComponent(seg);
+          if (!dec || dec === '.' || dec === '..' || /[\\/]/.test(dec)) return null;
+          // encodeURIComponent leaves ! ' ( ) * alone; encode them too so every character
+          // that can confuse a URL or a Markdown link is escaped.
+          out.push(encodeURIComponent(dec).replace(/[!'()*]/g,
+            (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase()));
+        }
+        return out.join('/');
+      }
+
+      // Parses results/INDEX.md. Lines look like:
+      //   - [Model](./source/rig/Model%20Name) by source on rig
+      // The path is cut at the ')' that precedes " by ", not at the first ')', so model
+      // folders containing parentheses, such as "Dusk (Default)", are kept.
+      function parseAutoEqIndex(mdText) {
+        const entries = [];
+        let candidates = 0;
+        for (const line of mdText.split(/\r?\n/)) {
+          const t = line.trim();
+          if (!t.startsWith('- [')) continue;
+          candidates++;
+          const sep = t.indexOf('](./');
+          if (sep < 0) continue;
+          const name = t.slice(3, sep).trim();
+          const rest = t.slice(sep + 4);
+          let end = rest.lastIndexOf(') by ');
+          if (end < 0 && rest.endsWith(')')) end = rest.length - 1;
+          if (end < 0 || !name) continue;
+          const relPath = normalizeAutoEqRelPath(rest.slice(0, end));
+          if (!relPath) continue;
+          const segs = relPath.split('/').map(safeDecodeURIComponent);
+          entries.push({
+            name,
+            relPath,
+            source: segs[0] || 'AutoEq',
+            rig: segs.length > 2 ? segs[1] : 'in-ear'
+          });
+        }
+        return { entries, candidates };
+      }
+
+      // Fetches results/<subPath> from the first mirror that answers AND whose body passes
+      // accept(text) (return a truthy value; it comes back as .value). Every failure is
+      // logged with its URL and reason, and summarised in .reasons for the UI.
+      async function fetchAutoEqResult(subPath, accept) {
+        const reasons = [];
+        const statuses = [];
+        for (const base of AUTOEQ_RESULTS_BASES) {
+          const url = `${base}/${subPath}`;
           try {
             const resp = await fetch(url);
-            if (!resp.ok) continue;
-            const mdText = await resp.text();
-
-            // Parse lines like: - [Model Name](./source/rig/Model%20Name) by source on rig
-            const lines = mdText.split(/\r?\n/);
-            const parsedCatalog = [];
-            const linkRx = /^\s*-\s*\[([^\]]+)\]\(\.\/([^)]+)\)(?:\s+by\s+([^]+?))?$/;
-
-            for (let i = 0; i < lines.length; i++) {
-              const m = lines[i].match(linkRx);
-              if (m) {
-                const name = m[1].trim();
-                const relPath = m[2].trim();
-                const segs = relPath.split('/');
-                const source = segs[0] ? decodeURIComponent(segs[0]) : 'AutoEq';
-                const rig = segs.length > 2 ? decodeURIComponent(segs[1]) : 'in-ear';
-                parsedCatalog.push({ name, relPath, source, rig });
-              }
+            if (!resp.ok) {
+              statuses.push(resp.status);
+              reasons.push(`HTTP ${resp.status}`);
+              console.warn(`[AutoEq] ${resp.status} for ${url}`);
+              continue;
             }
-
-            if (parsedCatalog.length > 100) {
-              state.autoEqCatalog = parsedCatalog;
-              state.autoEqLoaded = true;
-              if (badge) {
-                badge.textContent = `Search AutoEq (${parsedCatalog.length.toLocaleString()})`;
-              }
-              renderAutoEqSearchResults();
-              return;
-            }
-          } catch (_) {
-            // Try next mirror
+            const text = await resp.text();
+            const value = accept ? accept(text) : text;
+            if (value) return { value, url, reasons, statuses };
+            reasons.push('file had no usable data');
+            console.warn(`[AutoEq] no usable data in ${url}`);
+          } catch (err) {
+            reasons.push('network error or blocked request');
+            console.warn(`[AutoEq] request failed for ${url}`, err);
           }
         }
+        return { value: null, url: null, reasons: Array.from(new Set(reasons)), statuses };
+      }
 
-        if (badge) {
-          badge.textContent = 'Search AutoEq DB';
+      function describeAutoEqFailure(result) {
+        if (result.statuses.length && result.statuses.every((s) => s === 404)) {
+          return 'not found in AutoEq (HTTP 404).';
         }
+        return result.reasons.join(' / ') || 'unknown error';
+      }
+
+      let autoEqIndexLoading = false;
+
+      async function fetchFullAutoEqMasterIndex() {
+        if (autoEqIndexLoading) return;
+        autoEqIndexLoading = true;
+        const badge = document.getElementById('autoEqIndexBadge');
+        try {
+          if (!state.autoEqLoaded) {
+            state.autoEqCatalog = CURATED_FALLBACK_CATALOG.slice();
+            renderAutoEqSearchResults();
+          }
+
+          let applied = false;
+          let note = '';
+
+          const live = await fetchAutoEqResult('INDEX.md', (text) => {
+            const parsed = parseAutoEqIndex(text);
+            if (parsed.entries.length <= 100) return null;
+            parsed.text = text;
+            return parsed;
+          });
+
+          if (live.value) {
+            const { entries, candidates, text } = live.value;
+            state.autoEqCatalog = entries;
+            state.autoEqLoaded = true;
+            applied = true;
+            if (entries.length < candidates) {
+              note = `${candidates - entries.length} index lines could not be read`;
+              console.warn(`[AutoEq] parsed ${entries.length} of ${candidates} index lines`);
+            }
+            try { localStorage.setItem(AUTOEQ_INDEX_CACHE_KEY, text); } catch (_) {}
+            if (badge) badge.textContent = `Search AutoEq (${entries.length.toLocaleString()})`;
+          } else {
+            // Live index unavailable: fall back to the last good copy, if any.
+            try {
+              const cached = localStorage.getItem(AUTOEQ_INDEX_CACHE_KEY);
+              if (cached) {
+                const parsed = parseAutoEqIndex(cached);
+                if (parsed.entries.length > 100) {
+                  state.autoEqCatalog = parsed.entries;
+                  state.autoEqLoaded = true;
+                  applied = true;
+                  note = `live index unavailable (${describeAutoEqFailure(live)}); using cached copy`;
+                  if (badge) badge.textContent = `Search AutoEq (${parsed.entries.length.toLocaleString()}, cached)`;
+                }
+              }
+            } catch (_) {}
+          }
+
+          if (!applied) {
+            note = `AutoEq index unavailable: ${describeAutoEqFailure(live)}`;
+            if (badge) badge.textContent = 'Search AutoEq DB';
+            showToast(`${note}. Showing a short built-in list.`);
+          }
+          if (badge) badge.title = note;
+          renderAutoEqSearchResults();
+        } finally {
+          autoEqIndexLoading = false;
+        }
+      }
+
+      // Finds the live index entry for a model whose stored path no longer resolves
+      // (renamed folder, old share link, or a built-in fallback entry).
+      async function resolveAutoEqEntryFromIndex(entry) {
+        if (!state.autoEqLoaded) await fetchFullAutoEqMasterIndex();
+        if (!state.autoEqLoaded) return null;
+        const name = String(entry.name || '').toLowerCase();
+        const source = String(entry.source || '').toLowerCase();
+        const rig = String(entry.rig || '').toLowerCase();
+        const same = state.autoEqCatalog.filter((c) =>
+          c.name.toLowerCase() === name && c.source.toLowerCase() === source);
+        return same.find((c) => c.rig.toLowerCase() === rig) || same[0] || null;
       }
 
       // Escapes text before it goes into an innerHTML template. Needed for anything that can come
@@ -559,17 +682,17 @@
             <div class="min-w-0 flex-1">
               <div class="text-xs font-bold text-[#1E1D1A] truncate">${escapeHtml(item.name)}</div>
               <div class="text-[11px] text-[#5C5852] truncate">
-                <strong class="text-[#2E644C]">${escapeHtml(item.source)}</strong> • <span class="font-mono-num">${escapeHtml(item.rig)}</span>
+                <strong class="text-[#2E644C]">${escapeHtml(item.source)}</strong> • <span class="font-mono-num">${escapeHtml(item.rig)}</span>${item.noCsv ? ' • <span class="font-semibold text-[#C84B31]" title="AutoEq publishes no measurement file for this model">EQ only</span>' : ''}
               </div>
             </div>
             <div class="flex items-center gap-1.5 shrink-0">
-              <button type="button" class="load-fr-btn px-2.5 py-1 rounded-lg bg-[#C84B31] text-[#FBF9F5] text-[11px] font-bold cursor-pointer">
+              <button type="button" class="load-fr-btn px-2.5 py-1 rounded-lg bg-[#C84B31] text-[#FBF9F5] text-[11px] font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"${item.noCsv ? ' disabled title="AutoEq publishes no measurement for this model"' : ''}>
                 FR Curve
               </button>
               <button type="button" class="load-both-btn px-2 py-1 rounded-lg bg-[#EFEAE1] hover:bg-[#DED8CC] text-[#1E1D1A] text-[11px] font-bold cursor-pointer" title="Load FR + AutoEq ParametricEQ.txt">
                 +PEQ
               </button>
-              <button type="button" class="load-target-btn px-2 py-1 rounded-lg bg-[#1D5B4C] text-[#FBF9F5] text-[11px] font-bold cursor-pointer" title="Use this model as the target curve">
+              <button type="button" class="load-target-btn px-2 py-1 rounded-lg bg-[#1D5B4C] text-[#FBF9F5] text-[11px] font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"${item.noCsv ? ' disabled title="AutoEq publishes no measurement for this model"' : ' title="Use this model as the target curve"'}>
                 Target
               </button>
             </div>
@@ -602,84 +725,125 @@
         });
       }
 
-      async function loadModelFromAutoEqGitHub(entry, alsoLoadOfficialPeq = false, asTarget = false) {
-        showToast(`Fetching ${entry.name} (${entry.source}) from AutoEq GitHub...`);
-        const folderModelSegment = entry.relPath.split('/').pop(); // Already URL-encoded in INDEX.md
-        const rawCsvUrls = [
-          `https://raw.githubusercontent.com/jaakkopasanen/AutoEq/master/results/${entry.relPath}/${folderModelSegment}.csv`,
-          `https://cdn.jsdelivr.net/gh/jaakkopasanen/AutoEq@master/results/${entry.relPath}/${folderModelSegment}.csv`
-        ];
-
-        let loadedCurve = null;
-        for (const csvUrl of rawCsvUrls) {
-          try {
-            const resp = await fetch(csvUrl);
-            if (!resp.ok) continue;
-            const csvText = await resp.text();
-            loadedCurve = parseMeasurementTextToCurve(csvText);
-            if (loadedCurve) break;
-          } catch (_) {}
+      async function loadModelFromAutoEqGitHub(entry, alsoLoadOfficialPeq = false, asTarget = false, retried = false) {
+        const relPath = normalizeAutoEqRelPath(entry && entry.relPath);
+        if (!relPath) {
+          showToast(`Invalid AutoEq path${entry && entry.name ? ` for ${entry.name}` : ''}.`);
+          return;
         }
-
-        if (loadedCurve) {
+        // Already known to have no measurement CSV: only the official EQ bands exist.
+        if (entry.noCsv) {
           if (asTarget) {
-            setCustomIemTarget(loadedCurve, `${entry.name} (${entry.source})`);
-            showToast(`Set ${entry.name} as target`);
+            showToast(`${entry.name}: AutoEq publishes no measurement, so it cannot be used as a target.`);
+          } else {
+            await loadAutoEqBandsOnly(entry);
+          }
+          return;
+        }
+        showToast(`Fetching ${entry.name} (${entry.source}) from AutoEq GitHub...`);
+        const folderModelSegment = relPath.split('/').pop();
+        const result = await fetchAutoEqResult(
+          `${relPath}/${folderModelSegment}.csv`,
+          (text) => parseMeasurementTextToCurve(text)
+        );
+        const loadedCurve = result.value;
+
+        if (!loadedCurve) {
+          // A 404 usually means the folder was renamed. Look the model up in the live index
+          // by name and try its current path once.
+          if (!retried && result.statuses.length && result.statuses.every((s) => s === 404)) {
+            const alt = await resolveAutoEqEntryFromIndex(entry);
+            if (alt && normalizeAutoEqRelPath(alt.relPath) !== relPath) {
+              return loadModelFromAutoEqGitHub(alt, alsoLoadOfficialPeq, asTarget, true);
+            }
+          }
+          // The folder exists in the index but holds no CSV: AutoEq publishes the EQ results
+          // for many Crinacle models without his raw measurement.
+          if (result.statuses.length && result.statuses.every((s) => s === 404)) {
+            entry.noCsv = true;
+            renderAutoEqSearchResults();
+            if (alsoLoadOfficialPeq && !asTarget) {
+              await loadAutoEqBandsOnly(entry);
+            } else {
+              showToast(`${entry.name}: AutoEq publishes no measurement for this model. Use +PEQ to load its official EQ bands.`);
+            }
             return;
           }
+          console.error(`[AutoEq] could not load ${entry.name} (${relPath}):`, result.reasons);
+          showToast(`Could not load ${entry.name}: ${describeAutoEqFailure(result)}`);
+          return;
+        }
 
-          state.customIemCurve = loadedCurve;
-          state.customIemName = `${entry.name} (${entry.source})`;
-          state.selectedIemKey = 'custom';
-          state.activeAutoEqEntry = entry;
+        if (asTarget) {
+          setCustomIemTarget(loadedCurve, `${entry.name} (${entry.source})`);
+          showToast(`Set ${entry.name} as target`);
+          return;
+        }
 
-          const sel = document.getElementById('iemSelect');
-          let customOpt = sel.querySelector('option[value="custom"]');
-          if (!customOpt) {
-            customOpt = document.createElement('option');
-            customOpt.value = 'custom';
-            sel.prepend(customOpt);
-          }
-          customOpt.textContent = `AutoEq: ${state.customIemName}`;
-          sel.value = 'custom';
+        state.customIemCurve = loadedCurve;
+        state.customIemName = `${entry.name} (${entry.source})`;
+        state.selectedIemKey = 'custom';
+        state.activeAutoEqEntry = entry;
 
-          document.getElementById('activeIemTitleBadge').textContent = state.customIemName;
-          document.getElementById('btnLoadOfficialAutoEqPeq')?.classList.remove('hidden');
+        const sel = document.getElementById('iemSelect');
+        let customOpt = sel.querySelector('option[value="custom"]');
+        if (!customOpt) {
+          customOpt = document.createElement('option');
+          customOpt.value = 'custom';
+          sel.prepend(customOpt);
+        }
+        customOpt.textContent = `AutoEq: ${state.customIemName}`;
+        sel.value = 'custom';
 
-          syncWebAudioBiquadNodes();
+        document.getElementById('activeIemTitleBadge').textContent = state.customIemName;
+        document.getElementById('btnLoadOfficialAutoEqPeq')?.classList.remove('hidden');
 
-          if (alsoLoadOfficialPeq) {
-            await fetchOfficialAutoEqParametricTxt(entry);
-          } else {
-            showToast(`Loaded ${entry.name} measurement`);
-          }
+        syncWebAudioBiquadNodes();
+
+        if (alsoLoadOfficialPeq) {
+          await fetchOfficialAutoEqParametricTxt(entry);
         } else {
-          showToast(`Could not reach GitHub for ${entry.name}. Check connection.`);
+          showToast(`Loaded ${entry.name} measurement`);
         }
       }
 
-      async function fetchOfficialAutoEqParametricTxt(entry) {
-        if (!entry) return;
-        const folderModelSegment = entry.relPath.split('/').pop();
-        const peqUrls = [
-          `https://raw.githubusercontent.com/jaakkopasanen/AutoEq/master/results/${entry.relPath}/${folderModelSegment}%20ParametricEQ.txt`,
-          `https://cdn.jsdelivr.net/gh/jaakkopasanen/AutoEq@master/results/${entry.relPath}/${folderModelSegment}%20ParametricEQ.txt`
-        ];
-
-        for (const url of peqUrls) {
-          try {
-            const resp = await fetch(url);
-            if (!resp.ok) continue;
-            const txt = await resp.text();
-            const count = applyEqualizerApoTextToState(txt, `Official AutoEq (${entry.source})`);
-            if (count > 0) {
-              showToast(`Loaded ${count} official AutoEq bands for ${entry.name}`);
-              return;
-            }
-          } catch (_) {}
+      async function fetchOfficialAutoEqParametricTxt(entry, { solverFallback = true, silent = false } = {}) {
+        if (!entry) return 0;
+        const relPath = normalizeAutoEqRelPath(entry.relPath);
+        if (!relPath) {
+          if (solverFallback) {
+            showToast('Invalid AutoEq path; running local AutoEQ solver instead.');
+            runAutoEqSolverToCurrentTarget();
+          }
+          return 0;
         }
-        showToast('Official ParametricEQ.txt not found; running local AutoEQ solver instead.');
-        runAutoEqSolverToCurrentTarget();
+        const folderModelSegment = relPath.split('/').pop();
+        const result = await fetchAutoEqResult(
+          `${relPath}/${folderModelSegment}%20ParametricEQ.txt`,
+          (text) => {
+            const count = applyEqualizerApoTextToState(text, `Official AutoEq (${entry.source})`);
+            return count > 0 ? count : null;
+          }
+        );
+        if (result.value) {
+          if (!silent) showToast(`Loaded ${result.value} official AutoEq bands for ${entry.name}`);
+          return result.value;
+        }
+        console.error(`[AutoEq] no ParametricEQ.txt for ${entry.name} (${relPath}):`, result.reasons);
+        if (solverFallback) {
+          showToast(`Official ParametricEQ.txt unavailable (${describeAutoEqFailure(result)}); running local AutoEQ solver instead.`);
+          runAutoEqSolverToCurrentTarget();
+        }
+        return 0;
+      }
+
+      // For models with no published measurement: load only the official EQ bands. The stock
+      // curve is left as it was, and no local solver is run (it would fit an unrelated curve).
+      async function loadAutoEqBandsOnly(entry) {
+        const count = await fetchOfficialAutoEqParametricTxt(entry, { solverFallback: false, silent: true });
+        showToast(count
+          ? `${entry.name}: AutoEq publishes no measurement for this model. Loaded its ${count} official EQ bands; the stock curve is unchanged.`
+          : `${entry.name}: AutoEq publishes no measurement and no readable EQ file for this model.`);
       }
 
       // ====================================================================
@@ -1063,6 +1227,7 @@
 
       function syncWebAudioBiquadNodes() {
         recomputeAcousticCurves();
+        renderAutoEqHeadroomNotice();
         updateApoPreviewUi();
         updateActiveBandPillUi();
         renderTelemetryMatrix();
@@ -2574,9 +2739,112 @@
         return fitParametricEq(desired, sr);
       }
 
+      // Post-AutoEQ guidance uses the same response grid and margin as Auto preamp.
+      // It never changes the fit or preamp without a user action.
+      let autoEqHeadroomActive = false;
+      let headroomDismissedKey = '';
+      let headroomUndo = null;
+      function headroomKey() {
+        return JSON.stringify([state.bands, state.autoPreamp, currentSampleRate(), engineHonorsShelfQ]);
+      }
+      function analyzeAutoEqHeadroom(bands, curves, frequencies) {
+        const total = new Float64Array(frequencies.length);
+        bands.forEach((b, j) => {
+          if (b.enabled) for (let i = 0; i < total.length; i++) total[i] += curves[j][i];
+        });
+        const preampFor = peak => peak > 0.1 ? Number((-(peak + 0.3)).toFixed(1)) : 0;
+        let peak = 0, peakIndex = 0;
+        for (let i = 0; i < total.length; i++) {
+          if (total[i] > peak) { peak = total[i]; peakIndex = i; }
+        }
+        const preamp = preampFor(peak);
+        let best = null;
+        bands.forEach((b, j) => {
+          if (!b.enabled) return;
+          let remainingPeak = 0;
+          for (let i = 0; i < total.length; i++) remainingPeak = Math.max(remainingPeak, total[i] - curves[j][i]);
+          const withoutPreamp = preampFor(remainingPeak);
+          const recovery = withoutPreamp - preamp;
+          if (!best || recovery > best.recovery) best = { id: b.id, number: j + 1, withoutPreamp, recovery };
+        });
+        return { preamp, peakFrequency: frequencies[peakIndex], best: best && best.recovery >= 3 ? best : null };
+      }
+      function renderAutoEqHeadroomNotice() {
+        let panel = document.getElementById('autoEqHeadroomNotice');
+        if (!panel) {
+          const table = document.getElementById('bandsTableContainer');
+          if (!table) return;
+          panel = document.createElement('div');
+          panel.id = 'autoEqHeadroomNotice';
+          panel.setAttribute('role', 'status');
+          panel.setAttribute('aria-live', 'polite');
+          panel.style.cssText = 'margin:12px 0;padding:14px;border:1px solid #c99c50;border-radius:12px;background:#fff8e8;color:#49391e;font-size:13px;line-height:1.5';
+          table.before(panel);
+        }
+        const key = headroomKey();
+        if (panel.dataset.key === key) return;
+        panel.dataset.key = key;
+        panel.replaceChildren();
+        panel.hidden = true;
+        if (!autoEqHeadroomActive || headroomDismissedKey === key) return;
+        const addText = (text, bold = false) => {
+          const el = document.createElement(bold ? 'strong' : 'p');
+          el.textContent = text;
+          panel.append(el);
+        };
+        const addButton = (label, action) => {
+          const button = document.createElement('button');
+          button.type = 'button'; button.textContent = label;
+          button.style.cssText = 'margin:10px 8px 0 0;padding:6px 10px;border:1px solid #9c8053;border-radius:7px;background:#fff;cursor:pointer;color:#49391e';
+          button.addEventListener('click', action);
+          panel.append(button);
+        };
+        if (headroomUndo && headroomUndo.key === key) {
+          panel.hidden = false;
+          addText(`Band ${headroomUndo.number} disabled. Auto preamp is now ${state.preampDb.toFixed(1)} dB. The target match has changed.`);
+          addButton('Undo', () => {
+            if (headroomKey() !== key) return;
+            headroomUndo = null;
+            undoEq();
+          });
+          addButton('Dismiss', () => { headroomDismissedKey = key; panel.hidden = true; });
+          return;
+        }
+        headroomUndo = null;
+        if (!state.autoPreamp) return;
+        const sr = currentSampleRate();
+        const result = analyzeAutoEqHeadroom(state.bands, state.bands.map(b => getBandCurveDb(b, sr)), LOG_FREQS);
+        if (result.preamp >= -12) return;
+        panel.hidden = false;
+        addText('This EQ needs unusually high headroom', true);
+        const frequency = result.peakFrequency >= 1000 ? `${(result.peakFrequency / 1000).toFixed(1)} kHz` : `${Math.round(result.peakFrequency)} Hz`;
+        addText(`Auto preamp is ${result.preamp.toFixed(1)} dB to compensate for a large combined EQ peak near ${frequency}. This reduces playback volume. A filter’s listed gain can be lower than its resonant peak.`);
+        if (result.best) {
+          const best = result.best;
+          addText(`Disabling band ${best.number} would bring Auto preamp to approximately ${best.withoutPreamp.toFixed(1)} dB, but would change the target match. Compare the sound before keeping this change.`);
+          addButton(`Disable band ${best.number}`, () => {
+            if (headroomKey() !== key) return;
+            const band = state.bands.find(b => b.id === best.id);
+            if (!band || !band.enabled) return;
+            pushEqHistory();
+            band.enabled = false;
+            headroomUndo = { key: headroomKey(), number: best.number };
+            syncWebAudioBiquadNodes();
+            renderBandsTable();
+          });
+        } else {
+          addText('Several filters contribute to the headroom requirement; disabling any one band would recover less than 3 dB. Try reducing boosts and compare the resulting target match.');
+        }
+        addButton('Keep current EQ', () => { headroomDismissedKey = key; panel.hidden = true; });
+      }
+
       function runAutoEqSolverToCurrentTarget() {
         pushEqHistory();
         state.bands = computeAutoEqBandsForCurrentIem();
+        autoEqHeadroomActive = true;
+        headroomDismissedKey = "";
+        headroomUndo = null;
+        document.getElementById("autoEqHeadroomNotice")?.removeAttribute("data-key");
         state.selectedBandId = state.bands[0]?.id || 'b1';
         state.isEqActive = true;
         updateAbButtonUi();
@@ -3410,7 +3678,9 @@
         state.bands.forEach((b, i) => {
           const ft = FILTER_TYPES.find((t) => t.value === b.filterType) || FILTER_TYPES[0];
           const onOff = b.enabled ? 'ON' : 'OFF';
-          lines.push(`Filter ${i + 1}: ${onOff} ${ft.apo} Fc ${Math.round(b.frequency)} Hz Gain ${b.gain.toFixed(1)} dB Q ${b.Q.toFixed(2)}`);
+          const pass = b.filterType === 'lowpass' || b.filterType === 'highpass';
+          const gain = pass ? '' : ` Gain ${b.gain.toFixed(1)} dB`;
+          lines.push(`Filter ${i + 1}: ${onOff} ${ft.apo} Fc ${Math.round(b.frequency)} Hz${gain} Q ${b.Q.toFixed(2)}`);
         });
         return lines.join('\n');
       }
@@ -3611,6 +3881,7 @@
         pop.classList.toggle('hidden');
         if (!pop.classList.contains('hidden')) {
           document.getElementById('autoEqLiveSearchInput')?.focus();
+          if (!state.autoEqLoaded) fetchFullAutoEqMasterIndex();
         }
       });
 
@@ -4003,32 +4274,20 @@
       });
 
       document.getElementById('btnDownloadApoInline').addEventListener('click', () => {
-        const blob = new Blob([getEqualizerApoString()], { type: 'text/plain;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `SonaDSP_${state.selectedIemKey}_EQ.txt`;
-        a.click();
-        URL.revokeObjectURL(url);
+        downloadBlobFile(getEqualizerApoString(), 'text/plain;charset=utf-8', `${exportFileStem()}_EQ.txt`);
       });
 
-      document.getElementById('btnDownloadPowerampInline').addEventListener('click', () => {
-        const iemName = state.selectedIemKey === 'custom'
-          ? state.customIemName
-          : (BUILTIN_IEM_PROFILES[state.selectedIemKey]?.name || 'SonaDSP');
-        const { preset, skipped } = buildPowerampPreset(state.bands, state.preampDb, `SonaDSP - ${iemName}`, BAND_COLORS);
-        const blob = new Blob([JSON.stringify(preset, null, 2)], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `SonaDSP_${state.selectedIemKey}_Poweramp.json`;
-        a.click();
-        URL.revokeObjectURL(url);
-        showToast(
-          skipped.length > 0
-            ? `Downloaded Poweramp .json. Left out ${skipped.length} band${skipped.length > 1 ? 's' : ''} it can't represent: ${skipped.join(', ')}`
-            : 'Downloaded Poweramp Parametric EQ .json'
-        );
+      const powerampExportButton = document.getElementById('btnDownloadPowerampInline');
+      powerampExportButton.textContent = 'Poweramp / AutoEq (.txt)';
+      powerampExportButton.title = 'AutoEq parametric text. In Poweramp, use Parametric mode and Presets > Import.';
+      powerampExportButton.addEventListener('click', () => {
+        try {
+          const text = buildAutoEqParametricText(state.bands, state.preampDb);
+          downloadBlobFile(text, 'text/plain;charset=utf-8', `${exportFileStem()}_ParametricEQ.txt`);
+          showToast('Downloaded AutoEq .txt. In Poweramp, select Parametric mode, then Presets > Import and select the imported preset.');
+        } catch (error) {
+          showToast(error.message);
+        }
       });
 
       // APO Import Modal
@@ -4048,10 +4307,8 @@
         // The pasted text is auto-detected: Equalizer APO, GraphicEQ, DSP JSON, Poweramp,
         // Easy Effects or CamillaDSP YAML all work here.
         const raw = document.getElementById('apoImportTextarea').value;
-        if (importPresetText(raw, 'pasted text')) {
-          document.getElementById('modalApo').classList.add('hidden');
-          document.getElementById('modalApo').classList.remove('flex');
-        }
+        // Keep the shared import report visible, including format-conversion warnings.
+        importPresetText(raw, 'pasted text');
       });
 
       // AI Config Modal
@@ -4234,34 +4491,27 @@
           })
         };
       }
-      // Poweramp parametric preset. Only peaking / low shelf / high shelf map to a Poweramp band type
-      // (3 / 4 / 5). Low-pass and high-pass used to be written out as peaking filters, which is wrong,
-      // and disabled bands used to be exported as if they were active. Both are now left out,
-      // and `skipped` lists them (e.g. "band 6 (high-pass)", "band 3 (disabled)") for a warning.
-      function buildPowerampPreset(bands, preampDb, name, colors) {
-        const typeMap = { peaking: 3, lowshelf: 4, highshelf: 5 };
-        const skipped = [];
-        const out = [];
-        bands.forEach((b, idx) => {
-          if (!b.enabled) { skipped.push(`band ${idx + 1} (disabled)`); return; }
-          const t = typeMap[b.filterType];
-          if (t === undefined) {
-            skipped.push(`band ${idx + 1} (${b.filterType === 'lowpass' ? 'low-pass' : 'high-pass'})`);
-            return;
+      // Standard AutoEq ParametricEQ.txt, supported by Poweramp's preset importer.
+      // Do not invent a native Poweramp JSON schema or silently drop active filters.
+      // AutoEq's portable subset is PK/LSC/HSC; APO remains available for pass filters.
+      function buildAutoEqParametricText(bands, preampDb) {
+        const types = { peaking: 'PK', lowshelf: 'LSC', highshelf: 'HSC' };
+        const active = bands.filter((b) => b.enabled);
+        if (!Number.isFinite(preampDb)) throw new Error('Preamp must be a finite number.');
+        const unsupported = active.filter((b) => !types[b.filterType]);
+        if (unsupported.length) {
+          throw new Error('AutoEq export supports peaking and shelf filters. Disable low/high-pass filters or use Equalizer APO / convolution WAV to preserve them.');
+        }
+        const lines = [`Preamp: ${preampDb.toFixed(1)} dB`];
+        active.forEach((b, i) => {
+          if (![b.frequency, b.gain, b.Q].every(Number.isFinite) || b.frequency <= 0 || b.Q <= 0) {
+            throw new Error(`Invalid parameters in active band ${i + 1}.`);
           }
-          out.push({
-            type: t,
-            channels: 0,
-            frequency: Math.round(b.frequency),
-            q: Number(Number(b.Q).toFixed(2)),
-            gain: Number(Number(b.gain).toFixed(1)),
-            color: colors ? colors[idx % colors.length] : undefined
-          });
+          lines.push(`Filter ${i + 1}: ON ${types[b.filterType]} Fc ${Math.round(b.frequency)} Hz Gain ${b.gain.toFixed(1)} dB Q ${b.Q.toFixed(2)}`);
         });
-        return {
-          preset: [{ name, preamp: preampDb, parametric: true, bands: out }],
-          skipped
-        };
+        // Some importers need a filter to recognize a preamp-only/flat preset.
+        if (!active.length) lines.push('Filter 1: ON PK Fc 1000 Hz Gain 0.0 dB Q 1.00');
+        return lines.join('\n') + '\n';
       }
 
       // ------------------------------------------------------------------
@@ -4464,7 +4714,6 @@
         panel.id = 'advancedExportPanel';
         panel.className = 'w-full mt-3 pt-3 border-t border-[#DED8CC] flex flex-wrap items-center gap-2';
         panel.innerHTML = `
-          <span class="text-xs font-bold text-[#5C5852] mr-1">Advanced export</span>
           <label class="flex items-center gap-1.5 text-xs font-semibold text-[#5C5852]">
             Sample rate
             <select id="exportSrSelect" class="bg-[#FBF9F5] border border-[#DED8CC] rounded-lg px-2 py-1 text-xs font-bold text-[#1E1D1A]">
@@ -4477,7 +4726,25 @@
           <button type="button" id="btnExportEasyEffects" class="${btn}" title="Easy Effects (Linux / PipeWire) output preset. Import it from the Presets menu.">Easy Effects (.json)</button>
           <button type="button" id="btnExportWavelet" class="${btn}" title="127-band GraphicEQ line for Wavelet on Android (AutoEq tab, Import)">Wavelet GraphicEQ (.txt)</button>
         `;
-        host.insertAdjacentElement('afterend', panel);
+        const strip = host.parentElement;
+        strip.id = 'allExportsPanel';
+        strip.className = 'pt-3 border-t border-[#EFEAE1] space-y-3';
+        const label = strip.querySelector('span');
+        if (label) label.textContent = 'Exports';
+        panel.className = 'flex flex-wrap items-center gap-2';
+        // All format buttons share one wrapping group; rate selection follows below.
+        strip.append(panel);
+        for (const button of Array.from(panel.querySelectorAll('button'))) host.append(button);
+        document.getElementById('btnDownloadApoInline').textContent = 'Equalizer APO (.txt)';
+        const preview = document.getElementById('apoLivePreview');
+        if (preview) {
+          const details = document.createElement('details');
+          const summary = document.createElement('summary');
+          summary.textContent = 'Preview Equalizer APO configuration';
+          summary.className = 'text-xs font-semibold cursor-pointer';
+          details.append(summary, preview);
+          strip.append(details);
+        }
 
         document.getElementById('exportSrSelect').addEventListener('change', (e) => {
           exportSampleRate = parseInt(e.target.value, 10) || 48000;
@@ -5394,11 +5661,23 @@
       // Import row, built next to the export buttons like the advanced export panel, so no HTML change.
       function injectImportUi() {
         if (document.getElementById('presetImportPanel')) return;
-        const anchor = document.getElementById('advancedExportPanel')
-          || document.getElementById('btnDownloadPowerampInline')
-          || document.getElementById('btnDownloadApoInline');
-        if (!anchor) return;
-        const host = anchor.id === 'advancedExportPanel' ? anchor : anchor.parentElement;
+        const modal = document.getElementById('modalApo');
+        const textarea = document.getElementById('apoImportTextarea');
+        const host = textarea?.parentElement;
+        if (!modal || !host) return;
+        const topButton = document.getElementById('btnOpenApoModal');
+        const topLabel = topButton?.querySelector('span');
+        if (topLabel) topLabel.textContent = 'Import Preset';
+        if (topButton) topButton.title = 'Import a preset file or paste a configuration';
+        const heading = modal.querySelector('h3');
+        if (heading) heading.textContent = 'Import Preset';
+        const description = heading?.parentElement.querySelector('p');
+        if (description) description.textContent = 'Open a preset file or paste a configuration below. The format is detected automatically.';
+        const pasteLabel = host.querySelector('label');
+        if (pasteLabel) { pasteLabel.textContent = 'Paste preset configuration'; pasteLabel.htmlFor = 'apoImportTextarea'; }
+        textarea.placeholder = 'Paste Equalizer APO, GraphicEQ, DSP JSON, Poweramp, Easy Effects or CamillaDSP configuration…';
+        modal.firstElementChild.style.maxHeight = '90vh';
+        modal.firstElementChild.style.overflowY = 'auto';
 
         const btn = 'px-3 py-1.5 rounded-lg text-xs font-bold bg-[#EFEAE1] hover:bg-[#DED8CC] text-[#1E1D1A] border border-[#DED8CC] transition cursor-pointer';
         const panel = document.createElement('div');
@@ -5411,7 +5690,7 @@
           <input type="file" id="presetImportInput" class="hidden" accept=".json,.txt,.yml,.yaml,.conf,.wav" />
           <div id="importReport" class="hidden w-full rounded-lg bg-[#F4F0EA] border border-[#DED8CC] p-2.5"></div>
         `;
-        host.insertAdjacentElement('afterend', panel);
+        host.insertAdjacentElement('beforebegin', panel);
 
         const input = document.getElementById('presetImportInput');
         document.getElementById('btnImportPresetFile').addEventListener('click', () => input.click());
