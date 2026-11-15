@@ -1,165 +1,434 @@
-:root {
-      --bg-canvas: #F4F0EA;
-      --bg-card: #FBF9F5;
-      --bg-plot: #FCFBF8;
-      --bg-well: #EFEAE1;
-      --border-soft: #DED8CC;
-      --border-strong: #C5BCAE;
-      --ink-main: #1E1D1A;
-      --ink-sub: #5C5852;
-      --ink-muted: #857F75;
-      --accent-terracotta: #C84B31;
-      --accent-terracotta-dark: #AD3B23;
-      --accent-forest: #2E644C;
-      --accent-slate: #3A6B88;
-      --accent-amber: #C97026;
-    }
+/* ==========================================================================
+   MATERIAL YOU (M3) DYNAMIC TONAL PALETTE — LIGHT & DARK MODE
+   ========================================================================== */
+:root,
+[data-theme="light"] {
+  --md-sys-color-background: #FAF8FF;
+  --md-sys-color-on-background: #1A1B21;
+  --md-sys-color-surface: #FAF8FF;
+  --md-sys-color-surface-dim: #DAD9E0;
+  --md-sys-color-surface-container-lowest: #FFFFFF;
+  --md-sys-color-surface-container-low: #F4F2FA;
+  --md-sys-color-surface-container: #EEEDF4;
+  --md-sys-color-surface-container-high: #E8E7EF;
+  --md-sys-color-surface-container-highest: #E2E1E9;
+  --md-sys-color-on-surface: #1A1B21;
+  --md-sys-color-on-surface-variant: #45464F;
+  --md-sys-color-outline: #757680;
+  --md-sys-color-outline-variant: #C5C6D0;
 
-    * {
-      box-sizing: border-box;
-    }
+  /* Primary: Tonal Audio Indigo */
+  --md-sys-color-primary: #4355B9;
+  --md-sys-color-primary-hover: #3446A8;
+  --md-sys-color-on-primary: #FFFFFF;
+  --md-sys-color-primary-container: #DEE0FF;
+  --md-sys-color-on-primary-container: #00105C;
 
-    body {
-      margin: 0;
-      background-color: var(--bg-canvas);
-      color: var(--ink-main);
-      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-      font-size: 15.5px;
-      line-height: 1.5;
-      -webkit-font-smoothing: antialiased;
-    }
+  /* Secondary: Harmonized Tonal Indigo-Slate (Replaces neon teal) */
+  --md-sys-color-secondary: #485478;
+  --md-sys-color-secondary-hover: #3B4666;
+  --md-sys-color-on-secondary: #FFFFFF;
+  --md-sys-color-secondary-container: #DCE2F9;
+  --md-sys-color-on-secondary-container: #151F3B;
 
-    .font-mono-num {
-      font-family: 'JetBrains Mono', monospace;
-      font-variant-numeric: tabular-nums;
-    }
+  /* Tertiary: Warm FFT Amber */
+  --md-sys-color-tertiary: #8B5000;
+  --md-sys-color-tertiary-container: #FFDCBE;
+  --md-sys-color-on-tertiary-container: #2C1600;
 
-    .studio-card {
-      background-color: var(--bg-card);
-      border: 1px solid var(--border-soft);
-      border-radius: 16px;
-      box-shadow: 0 2px 10px rgba(30, 29, 26, 0.035);
-    }
+  /* Inverse Surface */
+  --md-sys-color-inverse-surface: #2F3036;
+  --md-sys-color-inverse-on-surface: #F1F0F7;
 
-    .studio-well {
-      background-color: var(--bg-canvas);
-      border: 1px solid var(--border-soft);
-      border-radius: 12px;
-    }
+  /* Legacy alias variables */
+  --bg-canvas: var(--md-sys-color-background);
+  --bg-card: var(--md-sys-color-surface-container-low);
+  --bg-plot: var(--md-sys-color-surface-container-lowest);
+  --bg-well: var(--md-sys-color-surface-container);
+  --border-soft: var(--md-sys-color-outline-variant);
+  --border-strong: var(--md-sys-color-outline);
+  --ink-main: var(--md-sys-color-on-surface);
+  --ink-sub: var(--md-sys-color-on-surface-variant);
+  --ink-muted: var(--md-sys-color-outline);
+  --accent-terracotta: var(--md-sys-color-primary);
+  --accent-terracotta-dark: var(--md-sys-color-primary-hover);
+  --accent-forest: var(--md-sys-color-secondary);
+  --accent-amber: var(--md-sys-color-tertiary);
+}
 
-    /* Clean Range Sliders */
-    input[type="range"] {
-      -webkit-appearance: none;
-      appearance: none;
-      background: transparent;
-      cursor: pointer;
-      height: 22px;
-    }
+[data-theme="dark"] {
+  --md-sys-color-background: #111318;
+  --md-sys-color-on-background: #E2E2E9;
+  --md-sys-color-surface: #111318;
+  --md-sys-color-surface-dim: #111318;
+  --md-sys-color-surface-container-lowest: #0C0E13;
+  --md-sys-color-surface-container-low: #191B21;
+  --md-sys-color-surface-container: #1E2026;
+  --md-sys-color-surface-container-high: #282A31;
+  --md-sys-color-surface-container-highest: #33353C;
+  --md-sys-color-on-surface: #E2E2E9;
+  --md-sys-color-on-surface-variant: #C5C6D0;
+  --md-sys-color-outline: #8F909A;
+  --md-sys-color-outline-variant: #383942;
 
-    input[type="range"]::-webkit-slider-runnable-track {
-      height: 6px;
-      border-radius: 999px;
-      background: #DED8CC;
-    }
+  /* Primary: Luminous Pastel Indigo */
+  --md-sys-color-primary: #BAC3FF;
+  --md-sys-color-primary-hover: #D4DAFF;
+  --md-sys-color-on-primary: #08218A;
+  --md-sys-color-primary-container: #293CA0;
+  --md-sys-color-on-primary-container: #DEE0FF;
 
-    input[type="range"]::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      appearance: none;
-      width: 16px;
-      height: 16px;
-      border-radius: 999px;
-      background: var(--accent-terracotta);
-      border: 2px solid #FBF9F5;
-      margin-top: -5px;
-      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
-      transition: transform 0.12s ease;
-    }
+  /* Secondary: Muted Steel-Indigo Tonal Container */
+  --md-sys-color-secondary: #B4C0E8;
+  --md-sys-color-secondary-hover: #CBD4F4;
+  --md-sys-color-on-secondary: #1D2847;
+  --md-sys-color-secondary-container: #2E3A5C;
+  --md-sys-color-on-secondary-container: #DCE2F9;
 
-    input[type="range"]::-webkit-slider-thumb:hover {
-      transform: scale(1.12);
-    }
+  /* Tertiary: Warm Gold FFT */
+  --md-sys-color-tertiary: #FFB870;
+  --md-sys-color-tertiary-container: #693C00;
+  --md-sys-color-on-tertiary-container: #FFDCBE;
 
-    input[type="range"]:disabled {
-      opacity: 0.35;
-      cursor: not-allowed;
-    }
+  /* Inverse Surface */
+  --md-sys-color-inverse-surface: #E2E2E9;
+  --md-sys-color-inverse-on-surface: #2F3036;
+}
 
-    ::-webkit-scrollbar {
-      width: 8px;
-      height: 8px;
-    }
-    ::-webkit-scrollbar-track {
-      background: var(--bg-canvas);
-    }
-    ::-webkit-scrollbar-thumb {
-      background: #C8C0B3;
-      border-radius: 4px;
-    }
-    ::-webkit-scrollbar-thumb:hover {
-      background: #A69D8E;
-    }
+* {
+  box-sizing: border-box;
+}
 
-    #toastBanner {
-      transition: opacity 0.2s ease, transform 0.2s ease;
-    }
+body {
+  margin: 0;
+  background-color: var(--md-sys-color-background);
+  color: var(--md-sys-color-on-background);
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 15.5px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  transition: background-color 0.25s cubic-bezier(0.2, 0, 0, 1),
+              color 0.25s cubic-bezier(0.2, 0, 0, 1);
+}
 
+.font-mono-num {
+  font-family: 'JetBrains Mono', monospace;
+  font-variant-numeric: tabular-nums;
+}
 
-    /* ---- Seek bar: highlight the A-B loop region ---- */
-    #seekSlider {
-      --loop-a: 0%;
-      --loop-b: 0%;
-      --loop-color: transparent;
-    }
-    #seekSlider::-webkit-slider-runnable-track {
-      background: linear-gradient(to right,
-        #DED8CC 0%, #DED8CC var(--loop-a),
-        var(--loop-color) var(--loop-a), var(--loop-color) var(--loop-b),
-        #DED8CC var(--loop-b), #DED8CC 100%);
-    }
-    #seekSlider::-moz-range-track {
-      height: 6px;
-      border-radius: 999px;
-      background: linear-gradient(to right,
-        #DED8CC 0%, #DED8CC var(--loop-a),
-        var(--loop-color) var(--loop-a), var(--loop-color) var(--loop-b),
-        #DED8CC var(--loop-b), #DED8CC 100%);
-    }
+/* ==========================================================================
+   ORIGINAL ROUNDED RECTANGLE CONTAINERS & ELEVATION
+   ========================================================================== */
+.m3-top-bar {
+  background-color: color-mix(in srgb, var(--md-sys-color-surface-container-low) 88%, transparent) !important;
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  border-bottom: 1px solid var(--md-sys-color-outline-variant) !important;
+}
 
-    /* ---- Drag & drop overlay ---- */
-    #audioDropOverlay {
-      display: none;
-      position: fixed;
-      inset: 0;
-      z-index: 60;
-      align-items: center;
-      justify-content: center;
-      background: rgba(30, 29, 26, 0.5);
-      backdrop-filter: blur(3px);
-      pointer-events: none;
-    }
-    #audioDropOverlay.active {
-      display: flex;
-    }
-    #audioDropOverlay .drop-card {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 6px;
-      padding: 40px 64px;
-      border: 3px dashed var(--accent-terracotta);
-      border-radius: 24px;
-      background: var(--bg-card);
-      color: var(--accent-terracotta);
-      box-shadow: 0 12px 40px rgba(30, 29, 26, 0.25);
-    }
-    #audioDropOverlay .drop-title {
-      font-size: 20px;
-      font-weight: 800;
-      color: var(--ink-main);
-    }
-    #audioDropOverlay .drop-sub {
-      font-size: 12px;
-      font-weight: 600;
-      color: var(--ink-sub);
-      letter-spacing: 0.04em;
-    }
+.studio-card {
+  background-color: var(--md-sys-color-surface-container-low);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: 16px;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.035);
+  transition: background-color 0.25s cubic-bezier(0.2, 0, 0, 1),
+              border-color 0.25s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.studio-well {
+  background-color: var(--md-sys-color-surface-container);
+  border: 1px solid var(--md-sys-color-outline-variant);
+  border-radius: 12px;
+  transition: background-color 0.25s cubic-bezier(0.2, 0, 0, 1),
+              border-color 0.25s cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* ==========================================================================
+   MATERIAL YOU SUN & MOON THEME SWITCH
+   ========================================================================== */
+.m3-theme-switch {
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.m3-switch-track {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 56px;
+  height: 32px;
+  padding: 4px;
+  border-radius: 9999px;
+  background-color: var(--md-sys-color-surface-container-highest);
+  border: 2px solid var(--md-sys-color-outline);
+  transition: background-color 0.28s cubic-bezier(0.2, 0, 0, 1),
+              border-color 0.28s cubic-bezier(0.2, 0, 0, 1);
+}
+
+.m3-switch-thumb {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background-color: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1),
+              background-color 0.25s cubic-bezier(0.2, 0, 0, 1),
+              color 0.25s cubic-bezier(0.2, 0, 0, 1);
+}
+
+[data-theme="dark"] .m3-switch-track {
+  background-color: var(--md-sys-color-primary-container);
+  border-color: var(--md-sys-color-primary);
+}
+
+[data-theme="dark"] .m3-switch-thumb {
+  transform: translateX(24px);
+  background-color: var(--md-sys-color-primary);
+  color: var(--md-sys-color-on-primary);
+}
+
+.m3-icon-sun,
+.m3-icon-moon {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  transition: opacity 0.22s ease, transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.m3-icon-sun {
+  opacity: 1;
+  transform: rotate(0deg) scale(1);
+}
+
+.m3-icon-moon {
+  opacity: 0;
+  transform: rotate(-90deg) scale(0.4);
+}
+
+[data-theme="dark"] .m3-icon-sun {
+  opacity: 0;
+  transform: rotate(90deg) scale(0.4);
+}
+
+[data-theme="dark"] .m3-icon-moon {
+  opacity: 1;
+  transform: rotate(0deg) scale(1);
+}
+
+/* ==========================================================================
+   TAILWIND ARBITRARY HEX BRIDGE -> MATERIAL YOU CSS TOKENS
+   ========================================================================== */
+.bg-\[\#FBF9F5\] { background-color: var(--md-sys-color-surface-container-low) !important; }
+.bg-\[\#FBF9F5\]\/95 { background-color: color-mix(in srgb, var(--md-sys-color-surface-container-high) 92%, transparent) !important; }
+.bg-\[\#FCFBF8\] { background-color: var(--md-sys-color-surface-container-lowest) !important; }
+.bg-\[\#F4F0EA\] { background-color: var(--md-sys-color-surface-container) !important; }
+.bg-\[\#F4F0EA\]\/60 { background-color: color-mix(in srgb, var(--md-sys-color-surface-container) 65%, transparent) !important; }
+.bg-\[\#EFEAE1\], .bg-\[\#E5E0D5\] { background-color: var(--md-sys-color-surface-container-high) !important; }
+
+.hover\:bg-\[\#EFEAE1\]:hover,
+.hover\:bg-\[\#F4F0EA\]:hover,
+.hover\:bg-\[\#DED8CC\]:hover {
+  background-color: var(--md-sys-color-surface-container-highest) !important;
+}
+
+.bg-\[\#C84B31\] {
+  background-color: var(--md-sys-color-primary) !important;
+  color: var(--md-sys-color-on-primary) !important;
+}
+.hover\:bg-\[\#AD3B23\]:hover {
+  background-color: var(--md-sys-color-primary-hover) !important;
+}
+
+.bg-\[\#2E644C\], .bg-\[\#1D5B4C\] {
+  background-color: var(--md-sys-color-secondary-container) !important;
+  color: var(--md-sys-color-on-secondary-container) !important;
+  border-color: color-mix(in srgb, var(--md-sys-color-secondary) 28%, transparent) !important;
+}
+.hover\:bg-\[\#214B38\]:hover {
+  background-color: color-mix(in srgb, var(--md-sys-color-secondary-container) 88%, var(--md-sys-color-secondary)) !important;
+}
+
+#abDot.bg-\[\#A7F3D0\] {
+  background-color: var(--md-sys-color-primary) !important;
+}
+
+.bg-\[\#1E1D1A\], .bg-\[\#181715\] {
+  background-color: var(--md-sys-color-primary-container) !important;
+  color: var(--md-sys-color-on-primary-container) !important;
+}
+
+.bg-\[\#C97026\] {
+  background-color: var(--md-sys-color-tertiary-container) !important;
+  color: var(--md-sys-color-on-tertiary-container) !important;
+}
+
+/* Text Tokens */
+.text-\[\#1E1D1A\], .text-\[\#181715\] { color: var(--md-sys-color-on-surface) !important; }
+.text-\[\#5C5852\], .text-\[\#57534E\] { color: var(--md-sys-color-on-surface-variant) !important; }
+.text-\[\#857F75\], .text-\[\#8A857B\] { color: var(--md-sys-color-outline) !important; }
+.text-\[\#C84B31\] { color: var(--md-sys-color-primary) !important; }
+.text-\[\#2E644C\], .text-\[\#1D5B4C\] { color: var(--md-sys-color-secondary) !important; }
+.text-\[\#C97026\] { color: var(--md-sys-color-tertiary) !important; }
+
+/* Ensure text inside primary/secondary buttons stays legible */
+.bg-\[\#C84B31\] .text-\[\#FBF9F5\],
+.bg-\[\#C84B31\].text-\[\#FBF9F5\] {
+  color: var(--md-sys-color-on-primary) !important;
+}
+.bg-\[\#2E644C\].text-\[\#FBF9F5\],
+.bg-\[\#1D5B4C\].text-\[\#FFFDF9\],
+.bg-\[\#1D5B4C\].text-\[\#FBF9F5\] {
+  color: var(--md-sys-color-on-secondary-container) !important;
+}
+.bg-\[\#1E1D1A\].text-\[\#FBF9F5\],
+.bg-\[\#181715\].text-\[\#FFFDF9\] {
+  color: var(--md-sys-color-on-primary-container) !important;
+}
+
+/* Toast Banner Invert */
+#toastBanner {
+  background-color: var(--md-sys-color-inverse-surface) !important;
+  color: var(--md-sys-color-inverse-on-surface) !important;
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+/* Border Tokens */
+.border-\[\#DED8CC\], .border-\[\#EFEAE1\] { border-color: var(--md-sys-color-outline-variant) !important; }
+.border-\[\#C5BCAE\] { border-color: var(--md-sys-color-outline) !important; }
+.border-\[\#C84B31\], .focus\:border-\[\#C84B31\]:focus { border-color: var(--md-sys-color-primary) !important; }
+.border-\[\#214B38\] { border-color: var(--md-sys-color-secondary) !important; }
+.divide-\[\#EFEAE1\] > :not([hidden]) ~ :not([hidden]) { border-color: var(--md-sys-color-outline-variant) !important; }
+
+/* ==========================================================================
+   SLIDERS & SCROLLBARS
+   ========================================================================== */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+  height: 22px;
+}
+
+input[type="range"]::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--md-sys-color-surface-container-highest);
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--md-sys-color-primary);
+  border: 2px solid var(--md-sys-color-surface);
+  margin-top: -5px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  transition: transform 0.12s ease;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.12);
+}
+
+input[type="range"]:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+input[type="checkbox"] {
+  accent-color: var(--md-sys-color-primary);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: var(--md-sys-color-surface);
+}
+::-webkit-scrollbar-thumb {
+  background: var(--md-sys-color-outline-variant);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--md-sys-color-outline);
+}
+
+/* ---- Seek bar: highlight the A-B loop region ---- */
+#seekSlider {
+  --loop-a: 0%;
+  --loop-b: 0%;
+  --loop-color: transparent;
+}
+#seekSlider::-webkit-slider-runnable-track {
+  background: linear-gradient(to right,
+    var(--md-sys-color-surface-container-highest) 0%,
+    var(--md-sys-color-surface-container-highest) var(--loop-a),
+    var(--loop-color) var(--loop-a),
+    var(--loop-color) var(--loop-b),
+    var(--md-sys-color-surface-container-highest) var(--loop-b),
+    var(--md-sys-color-surface-container-highest) 100%);
+}
+#seekSlider::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: linear-gradient(to right,
+    var(--md-sys-color-surface-container-highest) 0%,
+    var(--md-sys-color-surface-container-highest) var(--loop-a),
+    var(--loop-color) var(--loop-a),
+    var(--loop-color) var(--loop-b),
+    var(--md-sys-color-surface-container-highest) var(--loop-b),
+    var(--md-sys-color-surface-container-highest) 100%);
+}
+
+/* ---- Drag & drop overlay ---- */
+#audioDropOverlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  align-items: center;
+  justify-content: center;
+  background: rgba(17, 19, 24, 0.58);
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+#audioDropOverlay.active {
+  display: flex;
+}
+#audioDropOverlay .drop-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 40px 64px;
+  border: 3px dashed var(--md-sys-color-primary);
+  border-radius: 24px;
+  background: var(--md-sys-color-surface-container-high);
+  color: var(--md-sys-color-primary);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+}
+#audioDropOverlay .drop-title {
+  font-size: 20px;
+  font-weight: 800;
+  color: var(--md-sys-color-on-surface);
+}
+#audioDropOverlay .drop-sub {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--md-sys-color-on-surface-variant);
+  letter-spacing: 0.04em;
+}

@@ -2926,24 +2926,30 @@
       }
 
       // Legend drawn in the top margin: explains every curve on the graph
+      function isDarkThemeActive() {
+        return document.documentElement.getAttribute('data-theme') === 'dark';
+      }
+
+      // Legend drawn in the top margin: explains every curve on the graph
       function drawLegend(g) {
         const { padLeft, plotW } = g;
+        const dark = isDarkThemeActive();
         const tgt = getTargetLabel();
         const items = [];
         if (state.selectedIemKey !== 'flat_none') {
-          items.push({ label: 'Stock IEM', color: '#6E6A63', width: 2.2, dash: [7, 5] });
+          items.push({ label: 'Stock IEM', color: dark ? '#90929D' : '#656772', width: 2.2, dash: [7, 5] });
         }
         if (state.targetCurveKey !== 'none') {
-          items.push({ label: `Target: ${tgt.length > 18 ? tgt.slice(0, 17) + '…' : tgt}`, color: '#1D5B4C', width: 2.6 });
+          items.push({ label: `Target: ${tgt.length > 18 ? tgt.slice(0, 17) + '…' : tgt}`, color: dark ? '#55DBC1' : '#006B58', width: 2.6 });
         }
         items.push({
           label: state.isEqActive ? 'Post-EQ' : 'Response (EQ off)',
-          color: state.isEqActive ? '#C83E2B' : '#57534E',
+          color: state.isEqActive ? (dark ? '#BAC3FF' : '#4355B9') : (dark ? '#8F909A' : '#57534E'),
           width: 3.5
         });
-        items.push({ label: 'EQ filter', color: 'rgba(35, 87, 137, 0.85)', width: 2.0 });
+        items.push({ label: 'EQ filter', color: dark ? 'rgba(130, 180, 255, 0.85)' : 'rgba(35, 87, 137, 0.85)', width: 2.0 });
         if (state.showLiveFft) {
-          items.push({ label: 'Live FFT', color: 'rgba(217, 119, 36, 0.9)', width: 1.8 });
+          items.push({ label: 'Live FFT', color: dark ? 'rgba(255, 184, 112, 0.9)' : 'rgba(217, 119, 36, 0.9)', width: 1.8 });
         }
 
         ctx2d.font = '600 11.5px "JetBrains Mono", monospace';
@@ -2966,7 +2972,7 @@
           ctx2d.lineTo(x + swatchW, y);
           ctx2d.stroke();
           ctx2d.setLineDash([]);
-          ctx2d.fillStyle = '#4A463F';
+          ctx2d.fillStyle = dark ? '#C5C6D0' : '#45464F';
           ctx2d.fillText(it.label, x + swatchW + gap, y + 4);
           x += w + itemGap;
         });
@@ -2974,6 +2980,7 @@
 
       function renderCanvasLoop() {
         const geom = getPlotGeometry();
+        const dark = isDarkThemeActive();
         const dpr = window.devicePixelRatio || 1;
         if (canvas.width !== Math.floor(geom.W * dpr) || canvas.height !== Math.floor(geom.H * dpr)) {
           canvas.width = Math.floor(geom.W * dpr);
@@ -2985,10 +2992,10 @@
 
         const { W, H, padLeft, padTop, plotW, plotH } = geom;
 
-        // 1. Warm Parchment Plot Surface
-        ctx2d.fillStyle = '#FCFBF8';
+        // 1. Material You Tonal Plot Surface
+        ctx2d.fillStyle = dark ? '#0F1117' : '#FFFFFF';
         ctx2d.fillRect(0, 0, W, H);
-        ctx2d.fillStyle = '#FAF7F0';
+        ctx2d.fillStyle = dark ? '#15171E' : '#F6F5FC';
         ctx2d.fillRect(padLeft, padTop, plotW, plotH);
 
         // 2. Logarithmic Frequency Grid (20 Hz to 20 kHz)
@@ -3011,7 +3018,9 @@
 
         freqGrid.forEach(({ f, label }) => {
           const x = padLeft + freqToNormX(f) * plotW;
-          ctx2d.strokeStyle = label ? '#E2DDD2' : '#EFECE4';
+          ctx2d.strokeStyle = label
+            ? (dark ? '#282B36' : '#E2E1EC')
+            : (dark ? '#1E2029' : '#ECEBF5');
           ctx2d.lineWidth = label ? 1.1 : 1.0;
           ctx2d.beginPath();
           ctx2d.moveTo(x, padTop);
@@ -3019,7 +3028,7 @@
           ctx2d.stroke();
 
           if (label) {
-            ctx2d.fillStyle = '#5C5852';
+            ctx2d.fillStyle = dark ? '#90929D' : '#5A5B65';
             ctx2d.fillText(label, x, padTop + plotH + 23);
           }
         });
@@ -3030,7 +3039,9 @@
           const normY = relDbToNormY(relDb);
           const y = padTop + normY * plotH;
 
-          ctx2d.strokeStyle = relDb === 0 ? '#B8B0A2' : '#E6E1D6';
+          ctx2d.strokeStyle = relDb === 0
+            ? (dark ? '#4B4E5E' : '#B5B6C4')
+            : (dark ? '#232630' : '#E6E5F0');
           ctx2d.lineWidth = relDb === 0 ? 1.5 : 1.0;
           ctx2d.beginPath();
           ctx2d.moveTo(padLeft, y);
@@ -3039,14 +3050,16 @@
 
           // Left Axis Label (Relative dB)
           ctx2d.textAlign = 'right';
-          ctx2d.fillStyle = relDb === 0 ? '#1E1D1A' : '#6E6A63';
+          ctx2d.fillStyle = relDb === 0
+            ? (dark ? '#E2E2E9' : '#1A1B21')
+            : (dark ? '#8F909A' : '#656772');
           const sign = relDb > 0 ? '+' : '';
           ctx2d.fillText(`${sign}${relDb}dB`, padLeft - 10, y + 4);
 
-          // Right Axis Label (Right-aligned at W - 16 so it never overflows the right card border)
+          // Right Axis Label (dBFS)
           const dbfsVal = Math.round(normYToDbfs(normY));
           ctx2d.textAlign = 'right';
-          ctx2d.fillStyle = '#B45309';
+          ctx2d.fillStyle = dark ? '#FFB870' : '#9A5500';
           ctx2d.fillText(`${dbfsVal} dBFS`, W - 16, y + 4);
         });
 
@@ -3087,7 +3100,7 @@
               if (i === 0) ctx2d.moveTo(x, y);
               else ctx2d.lineTo(x, y);
             }
-            ctx2d.strokeStyle = 'rgba(110, 106, 99, 0.45)';
+            ctx2d.strokeStyle = dark ? 'rgba(160, 164, 180, 0.4)' : 'rgba(110, 106, 99, 0.45)';
             ctx2d.lineWidth = 1.5;
             ctx2d.stroke();
 
@@ -3111,19 +3124,19 @@
             ctx2d.closePath();
 
             const grad = ctx2d.createLinearGradient(0, padTop, 0, padTop + plotH);
-            grad.addColorStop(0.0, 'rgba(217, 119, 36, 0.36)');
-            grad.addColorStop(0.65, 'rgba(217, 119, 36, 0.15)');
-            grad.addColorStop(1.0, 'rgba(217, 119, 36, 0.02)');
+            grad.addColorStop(0.0, dark ? 'rgba(255, 184, 112, 0.34)' : 'rgba(217, 119, 36, 0.34)');
+            grad.addColorStop(0.65, dark ? 'rgba(255, 184, 112, 0.12)' : 'rgba(217, 119, 36, 0.14)');
+            grad.addColorStop(1.0, 'rgba(255, 184, 112, 0.01)');
             ctx2d.fillStyle = grad;
             ctx2d.fill();
 
-            ctx2d.strokeStyle = 'rgba(217, 119, 36, 0.85)';
+            ctx2d.strokeStyle = dark ? 'rgba(255, 184, 112, 0.88)' : 'rgba(217, 119, 36, 0.85)';
             ctx2d.lineWidth = 1.8;
             ctx2d.stroke();
           }
         }
 
-        // 5. Individual Filter Band Shaded Regions + Composite Blue Filter Transfer Curve
+        // 5. Individual Filter Band Shaded Regions + Composite Filter Transfer Curve
         const zeroY = padTop + relDbToNormY(0) * plotH;
         const sr = audioCtx ? audioCtx.sampleRate : 48000;
         state.bands.forEach((band, idx) => {
@@ -3142,11 +3155,11 @@
           ctx2d.lineTo(padLeft + plotW, zeroY);
           ctx2d.closePath();
 
-          ctx2d.fillStyle = isFocus ? `${color}28` : `${color}10`;
+          ctx2d.fillStyle = isFocus ? `${color}38` : `${color}16`;
           ctx2d.fill();
         });
 
-        // Composite EQ Filter Transfer Line (Cobalt Blue)
+        // Composite EQ Filter Transfer Line
         ctx2d.beginPath();
         for (let i = 0; i < NUM_FREQ_POINTS; i++) {
           const x = padLeft + (i / (NUM_FREQ_POINTS - 1)) * plotW;
@@ -3154,11 +3167,11 @@
           if (i === 0) ctx2d.moveTo(x, y);
           else ctx2d.lineTo(x, y);
         }
-        ctx2d.strokeStyle = 'rgba(35, 87, 137, 0.75)';
+        ctx2d.strokeStyle = dark ? 'rgba(130, 180, 255, 0.78)' : 'rgba(35, 87, 137, 0.75)';
         ctx2d.lineWidth = 2.0;
         ctx2d.stroke();
 
-        // 6. Custom Target Curve (Deep Forest Green)
+        // 6. Custom Target Curve (M3 Secondary Teal)
         if (state.targetCurveKey !== 'none') {
           ctx2d.beginPath();
           for (let i = 0; i < NUM_FREQ_POINTS; i++) {
@@ -3167,12 +3180,12 @@
             if (i === 0) ctx2d.moveTo(x, y);
             else ctx2d.lineTo(x, y);
           }
-          ctx2d.strokeStyle = '#1D5B4C';
+          ctx2d.strokeStyle = dark ? '#55DBC1' : '#006B58';
           ctx2d.lineWidth = 2.6;
           ctx2d.stroke();
         }
 
-        // 7. Raw Stock IEM Measurement Curve (Dashed Charcoal Slate)
+        // 7. Raw Stock IEM Measurement Curve (Dashed Neutral Slate)
         if (state.selectedIemKey !== 'flat_none') {
           ctx2d.beginPath();
           for (let i = 0; i < NUM_FREQ_POINTS; i++) {
@@ -3182,13 +3195,13 @@
             else ctx2d.lineTo(x, y);
           }
           ctx2d.setLineDash([7, 5]);
-          ctx2d.strokeStyle = '#6E6A63';
+          ctx2d.strokeStyle = dark ? '#8F909A' : '#6E6A63';
           ctx2d.lineWidth = 2.2;
           ctx2d.stroke();
           ctx2d.setLineDash([]);
         }
 
-        // 8. Post-EQ IEM Response Curve (Bold Acoustic Vermilion)
+        // 8. Post-EQ IEM Response Curve (M3 Primary Indigo)
         ctx2d.beginPath();
         for (let i = 0; i < NUM_FREQ_POINTS; i++) {
           const x = padLeft + (i / (NUM_FREQ_POINTS - 1)) * plotW;
@@ -3197,13 +3210,15 @@
           if (i === 0) ctx2d.moveTo(x, y);
           else ctx2d.lineTo(x, y);
         }
-        ctx2d.strokeStyle = state.isEqActive ? '#C83E2B' : '#57534E';
+        ctx2d.strokeStyle = state.isEqActive
+          ? (dark ? '#BAC3FF' : '#4355B9')
+          : (dark ? '#757680' : '#57534E');
         ctx2d.lineWidth = 3.5;
         ctx2d.stroke();
 
         // Hover Crosshair Guide
         if (hoverMouseCoords) {
-          ctx2d.strokeStyle = 'rgba(24, 23, 21, 0.25)';
+          ctx2d.strokeStyle = dark ? 'rgba(226, 226, 233, 0.25)' : 'rgba(24, 23, 21, 0.25)';
           ctx2d.lineWidth = 1.2;
           ctx2d.beginPath();
           ctx2d.moveTo(hoverMouseCoords.x, padTop);
@@ -3213,7 +3228,7 @@
 
         ctx2d.restore(); // End clip
 
-        // 9. Large, High-Legibility Draggable Band Handles (Radius 11px, 12.5px Font)
+        // 9. Draggable Band Handles
         state.bands.forEach((band, idx) => {
           const color = BAND_COLORS[idx % BAND_COLORS.length];
           const x = padLeft + freqToNormX(band.frequency) * plotW;
@@ -3226,7 +3241,7 @@
           if (isSelected || isHover) {
             ctx2d.beginPath();
             ctx2d.arc(x, y, 16, 0, Math.PI * 2);
-            ctx2d.fillStyle = `${color}28`;
+            ctx2d.fillStyle = `${color}33`;
             ctx2d.fill();
             ctx2d.strokeStyle = color;
             ctx2d.lineWidth = 2;
@@ -3235,20 +3250,20 @@
 
           ctx2d.beginPath();
           ctx2d.arc(x, y, 11, 0, Math.PI * 2);
-          ctx2d.fillStyle = band.enabled ? color : '#9E9587';
+          ctx2d.fillStyle = band.enabled ? color : (dark ? '#525460' : '#9E9587');
           ctx2d.fill();
-          ctx2d.strokeStyle = '#FFFDF9';
+          ctx2d.strokeStyle = dark ? '#191B21' : '#FFFFFF';
           ctx2d.lineWidth = 2.2;
           ctx2d.stroke();
 
-          ctx2d.fillStyle = '#FFFDF9';
+          ctx2d.fillStyle = '#FFFFFF';
           ctx2d.font = '700 12.5px "JetBrains Mono", monospace';
           ctx2d.textAlign = 'center';
           ctx2d.fillText(String(idx + 1), x, y + 4.5);
         });
 
         // Outer Plot Border
-        ctx2d.strokeStyle = '#B5ADA0';
+        ctx2d.strokeStyle = dark ? '#383942' : '#C5C6D0';
         ctx2d.lineWidth = 1.5;
         ctx2d.strokeRect(padLeft, padTop, plotW, plotH);
 
@@ -6275,7 +6290,27 @@
           }
         });
       }
+      
+      // Material You Sun & Moon Theme Switch
+      function initMaterialThemeSwitch() {
+        const btn = document.getElementById('themeToggleBtn');
+        if (!btn) return;
+        const syncAria = () => {
+          const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+          btn.setAttribute('aria-checked', String(isDark));
+        };
+        syncAria();
 
+        btn.addEventListener('click', () => {
+          const current = document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light';
+          const next = current === 'dark' ? 'light' : 'dark';
+          document.documentElement.setAttribute('data-theme', next);
+          try { localStorage.setItem('sonadsp_theme', next); } catch (_) {}
+          syncAria();
+          showToast(next === 'dark' ? 'Dark theme enabled' : 'Light theme enabled');
+        });
+      }
+      initMaterialThemeSwitch();
 
       // Initial Boot
       window.addEventListener('load', () => {
